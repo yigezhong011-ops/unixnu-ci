@@ -136,7 +136,16 @@ jobs:
           test -n "$DEC"
           cp "$DEC" "$KC/kernelcache.release.ipad7.decompressed"
           ls -la "$KC"
-          ./unixnu build kernel
+          # The legacy display builder reads build/display-analysis/mobile-graphics-legacy-abi.json, which
+          # audit-mobile-graphics-legacy.py writes into the tree; its failure is swallowed without the reason. Assemble the
+          # tree with a first pass, run that audit visibly, then build again.
+          if ! ./unixnu build kernel; then
+            T=$(ls -d out/*/tree | head -1)
+            echo "=== audit-mobile-graphics-legacy.py in $T"
+            ( cd "$T" && python3 scripts/audit-mobile-graphics-legacy.py ) || true
+            ls -la "$T/build/display-analysis" || true
+            ./unixnu build kernel
+          fi
           find out -path '*/kernel/kernel.macho' -newer "$RUNNER_TEMP/ref/url" -print
 
       - name: GPU addon
