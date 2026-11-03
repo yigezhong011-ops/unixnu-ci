@@ -158,23 +158,60 @@ jobs:
         working-directory: UniXNU
         run: |
           python3 - <<'PY'
-          import importlib.util, os, subprocess, sys
+          import importlib.util, json, os, re, subprocess, sys
           from pathlib import Path
           root = Path.cwd()
-          spec = importlib.util.spec_from_file_location('runtime', root / 'scripts/build-boot-runtime.py')
-          runtime = importlib.util.module_from_spec(spec)
-          sys.argv = ['build-boot-runtime.py']
-          spec.loader.exec_module(runtime)
-          plugin = runtime.build_plugin('ios')
+          def run(*cmd, **kw):
+              print('+', ' '.join(str(c) for c in cmd), flush=True)
+              subprocess.run([str(c) for c in cmd], check=True, **kw)
+          def checkout(path, pin):
+              if not path.exists():
+                  path.mkdir(parents=True)
+                  run('git', 'init', '-q', path)
+                  run('git', '-C', path, 'fetch', '-q', '--depth=1', pin.get('mirror', pin['repository']), pin['commit'])
+                  run('git', '-C', path, 'checkout', '-q', '--detach', 'FETCH_HEAD')
+                  return True
+              return False
+          if (root / 'scripts/build-boot-runtime.py').is_file():
+              spec = importlib.util.spec_from_file_location('runtime', root / 'scripts/build-boot-runtime.py')
+              runtime = importlib.util.module_from_spec(spec)
+              sys.argv = ['build-boot-runtime.py']
+              spec.loader.exec_module(runtime)
+              plugin = runtime.build_plugin('ios')
+          else:
+              # Older UniXNU (no build-boot-runtime.py): the same preparation by hand. Pinned Mesa plus its recorded
+              # patches, the pinned metal2vulkan translator, the compiler venv, then Turnip and the plugin.
+              pins = json.loads((root / 'scripts/data/adreno-compiler-inputs.json').read_text())
+              mesa = root / '.cache/mesa-work'
+              if checkout(mesa, pins['mesa']):
+                  for patch in pins.get('patches', []):
+                      run('git', '-C', mesa, 'apply', root / patch)
+              translator = json.loads((root / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())['translator']
+              checkout(root / '.cache/gpu-reference/metal2vulkan', translator)
+              venv = root / '.cache/mesa-venv'
+              if not (venv / 'bin/python').is_file():
+                  run(sys.executable, '-m', 'venv', venv)
+              run(venv / 'bin/python', '-m', 'pip', 'install', '-q', '-r', root / 'scripts/requirements-adreno-compiler.txt')
+              run(sys.executable, root / 'scripts/build-turnip-darwin.py', '--target', 'ios')
+              run(sys.executable, root / 'scripts/build-adreno-metal-plugin.py')
+              plugin = root / 'build/adreno-metal-plugin'
+              runtime = None
           print('plugin dir', plugin, sorted(p.name for p in plugin.iterdir()))
           out = root / 'fuxi-out'
           out.mkdir(exist_ok=True)
           subprocess.run([sys.executable, root / 'scripts/make-gpu-addon.py', '--publish', out / 'gpuaddon.bin'], check=True,
                          env=dict(os.environ, ADRENO_PLUGIN_DIR=str(plugin)))
-          work = out / 'addon-x'
-          work.mkdir(exist_ok=True)
-          hashes = runtime.addon_hashes(out / 'gpuaddon.bin', work)
+          # CDHashes of everything the addon will run (plugin, Turnip, probe daemon), for the owner trust module.
+          hashes = []
+          for f in sorted(plugin.rglob('*')):
+              if f.is_file() and f.read_bytes()[:4] in (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe'):
+                  d = subprocess.run(['codesign', '--display', '--verbose=4', str(f)], capture_output=True, text=True).stderr
+                  m = re.search(r'^CDHash=([0-9a-f]{40})$', d, re.M)
+                  if m:
+                      hashes.append(f'{m[1]} {f.relative_to(plugin)}')
           (out / 'cdhashes.txt').write_text('\n'.join(hashes) + '\n')
+          if (plugin / 'trust.json').is_file():
+              (out / 'trust.json').write_text((plugin / 'trust.json').read_text())
           print('CDHashes', hashes)
           PY
 
@@ -205,6 +242,7 @@ jobs:
         with:
           name: fuxi-gpu-logs
           path: |
+            UniXNU/out/*/logs/*.log
             UniXNU/out/*/*/*/logs/*.log
             UniXNU/.cache/*.log
           retention-days: 3
