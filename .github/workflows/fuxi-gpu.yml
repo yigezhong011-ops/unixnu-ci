@@ -192,6 +192,8 @@ jobs:
               if not (venv / 'bin/python').is_file():
                   run(sys.executable, '-m', 'venv', venv)
               run(venv / 'bin/python', '-m', 'pip', 'install', '-q', '-r', root / 'scripts/requirements-adreno-compiler.txt')
+              # gen-turnip-replay.py needs the host Turnip to capture a replay trace
+              run(sys.executable, root / 'scripts/build-turnip-darwin.py', '--target', 'host')
               run(sys.executable, root / 'scripts/build-turnip-darwin.py', '--target', 'ios')
               run(sys.executable, root / 'scripts/build-adreno-metal-plugin.py')
               plugin = root / 'build/adreno-metal-plugin'
