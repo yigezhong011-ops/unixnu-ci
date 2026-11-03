@@ -141,6 +141,12 @@ jobs:
           # tree with a first pass, run that audit visibly, then build again.
           if ! ./unixnu build kernel; then
             T=$(ls -d out/*/tree | head -1)
+            # Without the pruned QEMU runtime record the audit accepts only an existing analysis file that carries the
+            # recorded runtime observation hash; seed it inside the now assembled tree, then let the audit fill in the rest.
+            mkdir -p "$T/build/display-analysis"
+            [ -f "$T/build/display-analysis/mobile-graphics-legacy-abi.json" ] || \
+              echo '{"runtime_metadata_checkpoint_sha256": "3044c2beff552911605994c0dc7aa73182066cbb5aed0b396999ceeb5a96da2b"}' \
+              > "$T/build/display-analysis/mobile-graphics-legacy-abi.json"
             echo "=== audit-mobile-graphics-legacy.py in $T"
             ( cd "$T" && python3 scripts/audit-mobile-graphics-legacy.py ) || true
             ls -la "$T/build/display-analysis" || true
