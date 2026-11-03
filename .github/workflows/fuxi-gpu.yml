@@ -27,6 +27,10 @@ on:
         description: Build the kernel too (off builds only the GPU addon)
         type: boolean
         default: true
+      runner:
+        description: macOS runner label (macos-26 often gets no machine at busy hours)
+        required: true
+        default: macos-26
 
 permissions:
   contents: read
@@ -39,11 +43,21 @@ env:
 
 jobs:
   build:
-    runs-on: macos-26
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 360
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
+      - name: select Xcode
+        run: |
+          # Other runner images do not carry Xcode 26.6: take their newest one.
+          ls -d /Applications/Xcode*.app
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            X=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+            echo "DEVELOPER_DIR=$X/Contents/Developer" >> "$GITHUB_ENV"
+            echo "using $X"
+          fi
+
       - uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU
