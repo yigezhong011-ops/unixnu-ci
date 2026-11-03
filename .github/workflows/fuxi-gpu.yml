@@ -201,6 +201,8 @@ jobs:
               # gen-turnip-replay.py needs the host Turnip to capture a replay trace
               run(sys.executable, root / 'scripts/build-turnip-darwin.py', '--target', 'host')
               run(sys.executable, root / 'scripts/build-turnip-darwin.py', '--target', 'ios')
+              # the host self-tests link the host bridge library
+              run(sys.executable, root / 'scripts/build-adreno-metal-bridge.py', '--target', 'host')
               run(sys.executable, root / 'scripts/build-adreno-metal-plugin.py')
               plugin = root / 'build/adreno-metal-plugin'
               runtime = None
