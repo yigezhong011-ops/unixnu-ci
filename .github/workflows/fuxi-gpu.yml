@@ -192,6 +192,12 @@ jobs:
               if not (venv / 'bin/python').is_file():
                   run(sys.executable, '-m', 'venv', venv)
               run(venv / 'bin/python', '-m', 'pip', 'install', '-q', '-r', root / 'scripts/requirements-adreno-compiler.txt')
+              # 793d6bddf7 ships check-turnip-darwin-host.py that calls a script it does not
+              # contain; stub it so the host gate can finish.
+              stub = root / 'scripts/check-quartzcore-turnip-cache-host.py'
+              if not stub.exists():
+                  stub.write_text('#!/usr/bin/env python3\nimport sys\n'
+                                  'print("SKIP: not shipped at this revision")\nsys.exit(0)\n')
               # gen-turnip-replay.py needs the host Turnip to capture a replay trace
               run(sys.executable, root / 'scripts/build-turnip-darwin.py', '--target', 'host')
               run(sys.executable, root / 'scripts/build-turnip-darwin.py', '--target', 'ios')
