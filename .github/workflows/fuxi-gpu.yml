@@ -60,6 +60,10 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          path: ci-self
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
           repository: UniXNU/UniXNU
           ref: ${{ inputs.unixnu_ref }}
           path: UniXNU
@@ -175,6 +179,7 @@ jobs:
           import importlib.util, json, os, re, subprocess, sys
           from pathlib import Path
           root = Path.cwd()
+          own = Path(os.environ['GITHUB_WORKSPACE']) / 'ci-self/ci/patches'
           def run(*cmd, **kw):
               print('+', ' '.join(str(c) for c in cmd), flush=True)
               subprocess.run([str(c) for c in cmd], check=True, **kw)
@@ -200,6 +205,8 @@ jobs:
               if checkout(mesa, pins['mesa']):
                   for patch in pins.get('patches', []):
                       run('git', '-C', mesa, 'apply', root / patch)
+                  # Backport of upstream turnip-gmem-memory-side-swap: tile-memory passes stored BGRA8 with red and blue exchanged.
+                  run('git', '-C', mesa, 'apply', own / 'turnip-gmem-memory-side-swap-793d.patch')
               translator = json.loads((root / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())['translator']
               checkout(root / '.cache/gpu-reference/metal2vulkan', translator)
               venv = root / '.cache/mesa-venv'
@@ -231,13 +238,16 @@ jobs:
                   ps = ps.replace("'-Wall', '-Wextra', '-Werror',",
                                   "'-Wall', '-Wextra', '-Werror', '-Wno-error',")
                   plug.write_text(ps)
+              # The OS image's .metallib paths, embedded in the plugin: the render server's sandbox refuses to scan for them.
+              (root / 'build').mkdir(exist_ok=True)
+              (root / 'build/prime-list.txt').write_text((own / 'prime-list.txt').read_text())
               run(sys.executable, root / 'scripts/build-adreno-metal-plugin.py')
               plugin = root / 'build/adreno-metal-plugin'
               runtime = None
           print('plugin dir', plugin, sorted(p.name for p in plugin.iterdir()))
           out = root / 'fuxi-out'
           out.mkdir(exist_ok=True)
-          subprocess.run([sys.executable, root / 'scripts/make-gpu-addon.py', '--publish', out / 'gpuaddon.bin'], check=True,
+          subprocess.run([sys.executable, root / 'scripts/make-gpu-addon.py', '--publish', '--prime-list', own / 'prime-list.txt', out / 'gpuaddon.bin'], check=True,
                          env=dict(os.environ, ADRENO_PLUGIN_DIR=str(plugin)))
           # CDHashes of everything the addon will run (plugin, Turnip, probe daemon), for the owner trust module.
           hashes = []
