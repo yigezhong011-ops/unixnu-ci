@@ -23,6 +23,10 @@ on:
         description: Defconfig of the device repository
         required: true
         default: fuxi_full_defconfig
+      plugin_patch:
+        description: file in ci/patches to apply to drivers/AdrenoMetal before the build; empty for none
+        required: false
+        default: ''
       build_kernel:
         description: Build the kernel too (off builds only the GPU addon)
         type: boolean
@@ -171,6 +175,10 @@ jobs:
             ./unixnu build kernel
           fi
           find out -path '*/kernel/kernel.macho' -newer "$RUNNER_TEMP/ref/url" -print
+
+      - name: plugin patch
+        if: inputs.plugin_patch != ''
+        run: git -C UniXNU/drivers/AdrenoMetal apply --whitespace=nowarn "$GITHUB_WORKSPACE/ci-self/ci/patches/${{ inputs.plugin_patch }}"
 
       - name: GPU addon
         working-directory: UniXNU
