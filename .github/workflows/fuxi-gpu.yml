@@ -178,7 +178,22 @@ jobs:
 
       - name: plugin patch
         if: inputs.plugin_patch != ''
-        run: git -C UniXNU/drivers/AdrenoMetal apply --whitespace=nowarn "$GITHUB_WORKSPACE/ci-self/ci/patches/${{ inputs.plugin_patch }}"
+        run: |
+          git -C UniXNU/drivers/AdrenoMetal apply --whitespace=nowarn "$GITHUB_WORKSPACE/ci-self/ci/patches/${{ inputs.plugin_patch }}"
+          # Translator patches the plugin patch added go on the end of the bridge's recorded list.
+          python3 - <<'PY'
+          import pathlib, re
+          s = pathlib.Path('UniXNU/scripts/build-adreno-metal-bridge.py')
+          t = s.read_text()
+          names = re.findall(r"'(00[0-9]{2}-[^']+[.]patch)'", t)
+          have = sorted(p.name for p in pathlib.Path('UniXNU/drivers/AdrenoMetal/bridge/patches').glob('00*.patch'))
+          extra = [n for n in have if n not in names]
+          assert extra, 'no new translator patch'
+          last = "'" + names[-1] + "',"
+          assert t.count(last) == 1, last
+          s.write_text(t.replace(last, last + ' ' + ' '.join("'" + n + "'," for n in extra)))
+          print('added', extra)
+          PY
 
       - name: GPU addon
         working-directory: UniXNU
