@@ -189,9 +189,9 @@ jobs:
           have = sorted(p.name for p in pathlib.Path('UniXNU/drivers/AdrenoMetal/bridge/patches').glob('00*.patch'))
           extra = [n for n in have if n not in names]
           assert extra, 'no new translator patch'
-          last = "'" + names[-1] + "',"
+          last = "'" + names[-1] + "'"
           assert t.count(last) == 1, last
-          s.write_text(t.replace(last, last + ' ' + ' '.join("'" + n + "'," for n in extra)))
+          s.write_text(t.replace(last, last + ''.join(", '" + n + "'" for n in extra)))
           print('added', extra)
           PY
 
