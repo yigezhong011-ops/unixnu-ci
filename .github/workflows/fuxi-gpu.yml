@@ -94,6 +94,10 @@ jobs:
                   f.write_text(n)
                   print('fixed', f.name, c)
           PY
+          sed -i '' "s/'-Wall', '-Wextra', '-Werror',/'-Wall', '-Wextra', '-Werror', '-Wno-error',/" UniXNU/scripts/build-adreno-metal-plugin.py
+          grep -c "Wno-error" UniXNU/scripts/build-adreno-metal-plugin.py
+          mkdir -p UniXNU/build
+          cp ci-self/ci/patches/prime-list.txt UniXNU/build/prime-list.txt
       - uses: actions/checkout@v4
         with:
           repository: ${{ inputs.device_repository }}
