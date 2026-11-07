@@ -31,6 +31,10 @@ on:
         description: Skip UniXNU submodules whose pinned commit cannot be fetched (plugin-only builds)
         type: boolean
         default: false
+      size_opt:
+        description: Build the translator and plugin for size (test builds that must fit the addon)
+        type: boolean
+        default: false
       build_kernel:
         description: Build the kernel too (off builds only the GPU addon)
         type: boolean
@@ -219,6 +223,17 @@ jobs:
           s.write_text(t.replace(last, last + ''.join(", '" + n + "'" for n in extra)))
           print('added', extra)
           PY
+
+      - name: size options
+        if: inputs.size_opt
+        run: |
+          {
+            echo 'CARGO_PROFILE_RELEASE_OPT_LEVEL=s'
+            echo 'CARGO_PROFILE_RELEASE_LTO=fat'
+            echo 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1'
+            echo 'CARGO_PROFILE_RELEASE_STRIP=symbols'
+          } >> "$GITHUB_ENV"
+          sed -i '' "s/'-O2', '-g'/'-Os', '-g'/" UniXNU/scripts/build-adreno-metal-plugin.py
 
       - name: GPU addon
         working-directory: UniXNU
