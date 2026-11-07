@@ -27,6 +27,10 @@ on:
         description: file in ci/patches to apply to drivers/AdrenoMetal before the build; empty for none
         required: false
         default: ''
+      loose_submodules:
+        description: Skip UniXNU submodules whose pinned commit cannot be fetched (plugin-only builds)
+        type: boolean
+        default: false
       build_kernel:
         description: Build the kernel too (off builds only the GPU addon)
         type: boolean
@@ -71,8 +75,15 @@ jobs:
           repository: UniXNU/UniXNU
           ref: ${{ inputs.unixnu_ref }}
           path: UniXNU
-          submodules: recursive
+          submodules: ${{ inputs.loose_submodules && 'false' || 'recursive' }}
           persist-credentials: false
+      - name: loose submodules
+        if: inputs.loose_submodules
+        run: |
+          for s in $(git -C UniXNU config -f .gitmodules --get-regexp '\.path$' | awk '{print $2}'); do
+            git -C UniXNU submodule update --init --recursive --depth 1 -- "$s" || git -C UniXNU submodule update --init --recursive -- "$s" || echo "SKIPPED $s"
+          done
+          for s in drivers/Adreno740 drivers/AdrenoMetal kits/AdrenoPM4; do test -n "$(ls -A UniXNU/$s)"; done
       - uses: actions/checkout@v4
         with:
           repository: ${{ inputs.device_repository }}
