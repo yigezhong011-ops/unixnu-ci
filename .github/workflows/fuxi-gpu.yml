@@ -35,6 +35,10 @@ on:
         description: Build the translator and plugin for size (test builds that must fit the addon)
         type: boolean
         default: false
+      display_state:
+        description: Clear the display's deep flag on 21H461 (patches/adrenometal-21h461-display-state.patch), for a kernel whose display refuses b3a8
+        type: boolean
+        default: false
       build_kernel:
         description: Build the kernel too (off builds only the GPU addon)
         type: boolean
@@ -234,6 +238,10 @@ jobs:
             echo 'CARGO_PROFILE_RELEASE_STRIP=symbols'
           } >> "$GITHUB_ENV"
           sed -i '' "s/'-O2', '-g'/'-Os', '-g'/" UniXNU/scripts/build-adreno-metal-plugin.py
+
+      - name: display state patch
+        if: inputs.display_state
+        run: patch -p1 -d UniXNU/drivers/AdrenoMetal < patches/adrenometal-21h461-display-state.patch
 
       - name: GPU addon
         working-directory: UniXNU
