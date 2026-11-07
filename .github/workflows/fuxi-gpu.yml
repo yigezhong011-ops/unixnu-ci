@@ -84,6 +84,16 @@ jobs:
             git -C UniXNU submodule update --init --recursive --depth 1 -- "$s" || git -C UniXNU submodule update --init --recursive -- "$s" || echo "SKIPPED $s"
           done
           for s in drivers/Adreno740 drivers/AdrenoMetal kits/AdrenoPM4; do test -n "$(ls -A UniXNU/$s)"; done
+          # git apply refuses a created file with no "new file mode" line.
+          python3 - <<'PY'
+          import pathlib, re
+          for f in pathlib.Path('UniXNU/patches/mesa').glob('*.patch'):
+              s = f.read_text()
+              n, c = re.subn(r'^(diff --git [^\n]*\n)(--- /dev/null\n)', r'\1new file mode 100644\n\2', s, flags=re.M)
+              if c:
+                  f.write_text(n)
+                  print('fixed', f.name, c)
+          PY
       - uses: actions/checkout@v4
         with:
           repository: ${{ inputs.device_repository }}
