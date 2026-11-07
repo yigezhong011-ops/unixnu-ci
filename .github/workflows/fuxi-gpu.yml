@@ -241,7 +241,7 @@ jobs:
 
       - name: display state patch
         if: inputs.display_state
-        run: patch -p1 -d UniXNU/drivers/AdrenoMetal < patches/adrenometal-21h461-display-state.patch
+        run: patch -p1 -d UniXNU/drivers/AdrenoMetal < ci-self/patches/adrenometal-21h461-display-state.patch
 
       - name: GPU addon
         working-directory: UniXNU
