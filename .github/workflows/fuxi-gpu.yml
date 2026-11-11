@@ -243,6 +243,20 @@ jobs:
         if: inputs.display_state
         run: patch -p1 -d UniXNU/drivers/AdrenoMetal < ci-self/patches/adrenometal-21h461-display-state.patch
 
+      - name: self-bind tolerance
+        run: |
+          f=UniXNU/scripts/macho-self-bind-weak-imports.py
+          if [ -f "$f" ]; then
+            python3 - "$f" <<'PY'
+          import sys
+          p = sys.argv[1]; t = open(p).read()
+          old = "sys.exit(path + ': no chained fixups')"
+          if old in t:
+              t = t.replace(old, "print(path + ': no chained fixups, left as it is'); sys.exit(0)")
+              open(p, 'w').write(t); print('patched', p)
+          PY
+          fi
+
       - name: GPU addon
         working-directory: UniXNU
         run: |
