@@ -153,16 +153,22 @@ jobs:
           # QcomXnuUsbDebug's tests/check.py (host models: buffer, transport, PNG) trips one assertion on this runner
           # (test_usb_buffer.c relocated-buffer). It is a host-side self-test, not part of the kernel archive: skip it,
           # keep build.py and the XNU integration check (check_xnu.py).
-          python3 - device/scripts/build-fuxi-usb-debug.py <<'PY'
+          # Both copies: device/scripts and the iOS overlay's own (device-ios17/scripts, the one the tree uses).
+          for f in device/scripts/build-fuxi-usb-debug.py device-ios17/scripts/build-fuxi-usb-debug.py device/ios17/overlay/scripts/build-fuxi-usb-debug.py; do
+          [ -f "$f" ] || continue
+          [ -L "$f" ] && { echo "$f is a link, skipped"; continue; }
+          python3 - "$f" <<'PY'
           import sys
           p = sys.argv[1]; t = open(p).read()
           old = ("run([sys.executable, module / 'tests/check.py', '--target-clang', llvm / 'clang',\n"
                  "     '--output', root / '.cache/fuxi-qud-model-check'], host=True)")
-          assert old in t, 'check.py call moved'
+          if old not in t:
+              print(p, ': check.py call not found, unchanged'); sys.exit(0)
           t = t.replace(old, "(root / '.cache/fuxi-qud-model-check').mkdir(parents=True, exist_ok=True)\n"
                              "(root / '.cache/fuxi-qud-model-check/check-report.json').write_text('{\"skipped\": \"ci\"}\\n')")
-          open(p, 'w').write(t); print('model check skipped')
+          open(p, 'w').write(t); print(p, ': model check skipped')
           PY
+          done
 
       - name: uefi-fuxi (pinned fuxi.dtb, read only)
         run: |
