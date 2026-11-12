@@ -890,7 +890,7 @@ jobs:
           if ! command -v ipsw >/dev/null; then
             # ipsw cask did not load (Intel image): take the macOS build from blacktop/ipsw's latest release.
             A=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/blacktop/ipsw/releases/latest |
-                python3 -c 'import json,sys,platform; a=[x["browser_download_url"] for x in json.load(sys.stdin)["assets"]]; m="x86_64" if platform.machine()=="x86_64" else "arm64"; c=[u for u in a if "macOS" in u and u.endswith(".tar.gz") and "frida" not in u and ("universal" in u or m in u)]; print(c[0])')
+                python3 -c 'import json,sys,platform; a=[x["browser_download_url"] for x in json.load(sys.stdin)["assets"]]; m="x86_64" if platform.machine()=="x86_64" else "arm64"; c=[u for u in a if u.rsplit("/",1)[-1].startswith("ipsw_") and "macOS" in u and u.endswith(".tar.gz") and "frida" not in u and ("universal" in u or m in u)]; print(c[0])')
             echo "ipsw from $A"; mkdir -p "$RUNNER_TEMP/ipsw"; curl -fsSL "$A" | tar xz -C "$RUNNER_TEMP/ipsw"
             sudo install -m 0755 "$(find "$RUNNER_TEMP/ipsw" -name ipsw -type f | head -1)" /usr/local/bin/ipsw; fi
           ipsw version
