@@ -1,0 +1,183 @@
+name: fuxi iOS 17 kernel (Kerfand source)
+
+# Kerfand/UniXNU-Fuxi-Arm64e-iOS17 rebuilt: SadNutWall/UniXNU at its base commit + Kerfand's local commits, diffs, files and
+# xnu-10063 patches, device/ and ios17/ (device-ios17) from that repository, the iPhone15,2 21H16 kernelcache taken from Apple's
+# IPSW at build time. Kernels contain Apple code, so every output is encrypted to the owner's age key before upload.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kerfand_ref:
+        description: Kerfand/UniXNU-Fuxi-Arm64e-iOS17 ref
+        required: true
+        default: 53f1320c12d924eb9c88616b4adf9e66786f18e9
+      unixnu_base:
+        description: SadNutWall/UniXNU commit the local commit applies to
+        required: true
+        default: dec111b629bb66d3ec195c653853d8916db42b2a
+      metal_upstream:
+        description: Merge UniXNU/AdrenoMetal main into the AdrenoMetal submodule after Kerfand's diff
+        type: boolean
+        default: false
+      runner:
+        description: macOS runner label
+        required: true
+        default: macos-26
+
+permissions:
+  contents: read
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  AGE_RECIPIENT: age1fsmu7pn6at08gvtl3c4yccy0m55eaepphv5puxgx2a3mt8qhnqfshlfqzr
+  IPSW_URL: https://updates.cdn-apple.com/2024FallFCS/fullrestores/062-79094/90CE304F-6C16-402E-96C9-89260D93CA82/iPhone15,2_17.7_21H16_Restore.ipsw
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - name: select Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            X=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+            echo "DEVELOPER_DIR=$X/Contents/Developer" >> "$GITHUB_ENV"; echo "using $X"
+          fi
+      - uses: actions/checkout@v4
+        with:
+          path: ci-self
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Kerfand/UniXNU-Fuxi-Arm64e-iOS17
+          ref: ${{ inputs.kerfand_ref }}
+          path: kerfand
+          persist-credentials: false
+      - name: UniXNU at the base commit
+        run: |
+          git clone --filter=blob:none https://github.com/SadNutWall/UniXNU.git UniXNU
+          git -C UniXNU checkout -q "${{ inputs.unixnu_base }}"
+          git -C UniXNU submodule update --init --recursive --jobs 8 || echo "some submodules failed: listed below"
+          git -C UniXNU submodule status | grep '^-' || true
+
+      - name: apply Kerfand's changes
+        working-directory: UniXNU
+        run: |
+          K="$GITHUB_WORKSPACE/kerfand"
+          export GIT_COMMITTER_NAME=ci GIT_COMMITTER_EMAIL=ci@localhost
+          git am --keep-cr "$K"/unixnu/commits/UniXNU/*.patch
+          # Submodules at the commits Kerfand built against (diffs/<path with _>.HEAD.txt: first word).
+          for h in "$K"/unixnu/diffs/*.HEAD.txt; do
+            n=$(basename "$h" .HEAD.txt); [ "$n" = UniXNU ] && continue
+            p=${n/_//}; sha=$(head -1 "$h" | cut -d' ' -f1)
+            # A HEAD that is Kerfand's own local commit (XnuPrelink) is not on the server: keep the pin, the am below adds it.
+            if git -C "$p" fetch -q origin "$sha" 2>/dev/null; then git -C "$p" checkout -q "$sha"; else echo "$p: $sha not public, pin kept"; fi
+            echo "$p -> $(git -C "$p" log -1 --format='%h %s')"
+          done
+          for d in "$K"/unixnu/commits/*/; do
+            n=$(basename "$d"); [ "$n" = UniXNU ] || [ "$n" = device ] && continue
+            git -C "${n/_//}" am --keep-cr "$d"*.patch; echo "am $n"
+          done
+          # Diffs: drop submodule pointer hunks (the checkouts above already set them).
+          for f in "$K"/unixnu/diffs/*.diff; do
+            n=$(basename "$f" .diff); p=.; [ "$n" = UniXNU ] || p=${n/_//}
+            python3 - "$f" "$RUNNER_TEMP/$n.diff" <<'PY'
+          import re, sys
+          t = open(sys.argv[1], encoding='utf-8', errors='surrogateescape').read()
+          parts = re.split(r'(?m)^(?=diff --git )', t)
+          keep = [p for p in parts if 'Subproject commit' not in p]
+          open(sys.argv[2], 'w', encoding='utf-8', errors='surrogateescape').write(''.join(keep))
+          print(sys.argv[1], 'blocks', len(parts), 'kept', len(keep))
+          PY
+            git -C "$p" apply --whitespace=nowarn "$RUNNER_TEMP/$n.diff"; echo "applied $n in $p"
+          done
+          cp -R "$K"/unixnu/files/. .
+          mkdir -p patches/xnu-10063-arm64e; cp "$K"/unixnu/patches/xnu-10063-arm64e/*.patch patches/xnu-10063-arm64e/
+          git status --short | head -50
+
+      - name: AdrenoMetal upstream merge
+        if: inputs.metal_upstream
+        working-directory: UniXNU/drivers/AdrenoMetal
+        run: |
+          export GIT_COMMITTER_NAME=ci GIT_COMMITTER_EMAIL=ci@localhost GIT_AUTHOR_NAME=ci GIT_AUTHOR_EMAIL=ci@localhost
+          git add -A; git commit -q -m "Kerfand iOS 17 diff" || true
+          git fetch -q https://github.com/UniXNU/AdrenoMetal.git main
+          git log --oneline -1 FETCH_HEAD
+          git merge --no-edit FETCH_HEAD || { git diff --name-only --diff-filter=U; exit 1; }
+
+      - name: device and device-ios17
+        run: |
+          cp -R kerfand/device device
+          cp -R kerfand/ios17 device-ios17    # its symlinks point at ../device
+          # DataSkel21H16.h is generated from the 21H16 OS volume (Apple bytes) and is not published: an empty-content
+          # table keeps sheng-data-skel=1 harmless (one directory that always exists).
+          if [ ! -f device/package/DataSkel21H16.h ]; then
+            cat > device/package/DataSkel21H16.h <<'H'
+          struct sheng_skel_entry { const char *path; unsigned short mode; unsigned short uid, gid; unsigned char kind; unsigned short size; const char *data; };
+          static const struct sheng_skel_entry sheng_skel_21h16[] = {
+           {"/private/var/db", 0755, 0, 0, 0, 0, 0},
+          };
+          H
+          fi
+          ls -la device-ios17 | head -20
+
+      - name: tools
+        run: |
+          brew install vulkan-headers vulkan-loader dtc llvm lld cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup age unifdef blacktop/tap/ipsw
+          {
+            echo "$HOME/.cargo/bin"; echo "/opt/homebrew/opt/llvm/bin"; echo "/opt/homebrew/opt/lld/bin"
+            echo "/opt/homebrew/opt/bison/bin"; echo "$(brew --prefix unifdef)/bin"
+          } >> "$GITHUB_PATH"
+          rustup toolchain install 1.98.0 --profile minimal --component rust-src
+          rustup target add aarch64-apple-ios --toolchain 1.98.0
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: kernelcache 21H16
+        run: |
+          D="$GITHUB_WORKSPACE/UniXNU/out-ios17/ipsw/21H16"; mkdir -p "$D" "$RUNNER_TEMP/kc"
+          ipsw extract --kernel --remote "$IPSW_URL" -o "$RUNNER_TEMP/kc"
+          RAW=$(find "$RUNNER_TEMP/kc" -iname 'kernelcache.release.iphone15*' -type f | head -1)
+          echo "kernelcache: $RAW"; test -n "$RAW"
+          ipsw kernel dec "$RAW" -o "$RUNNER_TEMP/kc" || true
+          DEC=$(find "$RUNNER_TEMP/kc" -name '*.decompressed' -type f | head -1)
+          if [ -z "$DEC" ] && [ "$(head -c 4 "$RAW" | xxd -p)" = "cffaedfe" ]; then DEC=$RAW; fi
+          test -n "$DEC"; cp "$DEC" "$D/kernelcache.decompressed"; ls -la "$D"
+
+      - name: kernel
+        working-directory: UniXNU
+        env:
+          UNIXNU_XNU_ARCH: arm64e
+          UNIXNU_FILESET_KERNEL_FIRST: 1
+          XNU_KERNEL_CHAINED_FIXUPS: 1
+          JOBS: 4
+        run: |
+          export UNIXNU_OUT="$PWD/out-ios17" UNIXNU_KERNELCACHE="$PWD/out-ios17/ipsw/21H16/kernelcache.decompressed"
+          [ -f ../device/scripts/extract-files.py ] && python3 ../device/scripts/extract-files.py --device ../device || echo "extract-files skipped/failed"
+          ./unixnu defconfig fuxi_ios17_kernel_defconfig -D ../device-ios17
+          ./unixnu build kernel -D ../device-ios17 -j 4
+          find out-ios17 -name kernel.macho -print
+
+      - name: encrypt and upload
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/up"
+          K=$(find UniXNU/out-ios17 -path '*/kernel/kernel.macho' | head -1)
+          if [ -n "$K" ]; then
+            tar -C "$(dirname "$K")" -czf "$RUNNER_TEMP/k.tgz" .
+            age -r "$AGE_RECIPIENT" -o "$RUNNER_TEMP/up/ios17-kernel.tgz.age" "$RUNNER_TEMP/k.tgz"; rm -f "$RUNNER_TEMP/k.tgz"
+          fi
+          # Build logs only (no binaries): find *.log under out-ios17, encrypted too since they may quote kernel symbols.
+          find UniXNU/out-ios17 -name '*.log' -size -20M 2>/dev/null | tar -czf "$RUNNER_TEMP/logs.tgz" -T - 2>/dev/null || true
+          [ -s "$RUNNER_TEMP/logs.tgz" ] && age -r "$AGE_RECIPIENT" -o "$RUNNER_TEMP/up/logs.tgz.age" "$RUNNER_TEMP/logs.tgz"
+          ls -la "$RUNNER_TEMP/up"
+          rm -rf UniXNU/out-ios17/ipsw "$RUNNER_TEMP/kc"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unixnu-fuxi-ios17-kernel
+          path: ${{ runner.temp }}/up
+          if-no-files-found: warn
