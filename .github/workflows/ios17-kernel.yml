@@ -118,6 +118,123 @@ jobs:
           git log --oneline -1 FETCH_HEAD
           git merge --no-edit FETCH_HEAD || { git diff --name-only --diff-filter=U; exit 1; }
 
+      - name: fixture additions (pairings the boot (2) kernel had)
+        working-directory: UniXNU
+        run: |
+          # 14 originals the CI LTO reference left unpaired that Kerfand's boot (2) kernel pairs (same BL sites).
+          # bdevsw_isfree unpaired made IOStorageFamily loop until the 64-unmapped-call panic (run 13 boot).
+          cat > "$RUNNER_TEMP/fixture-adds.json" <<'JSON'
+          [
+           {
+            "original": "0xfffffff0082da0a0",
+            "original_size": 188,
+            "original_sha256": "54ae08508e5387a6542c3700570c50384d0bd8c8464d7e2773fd8a29b4567627",
+            "native_symbol": "_bdevsw_isfree",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff0082da0a0 in 21H16 call _bdevsw_isfree there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff00840095c",
+            "original_size": 240,
+            "original_sha256": "c32b16764d0ac2de1469ab1abf3c0c6713f646c5d804d05966dd6b74a70475ef",
+            "native_symbol": "__ZN10IOReporter12updateReportEP19IOReportChannelListjPvS2_",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff00840095c in 21H16 call __ZN10IOReporter12updateReportEP19IOReportChannelListjPvS2_ there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff008401f30",
+            "original_size": 280,
+            "original_sha256": "2e67132c10ac1ab0393a7573f87f6289d74a9e06e027cd301eb76620fae04a33",
+            "native_symbol": "__ZN16IOSimpleReporter14incrementValueEyx",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff008401f30 in 21H16 call __ZN16IOSimpleReporter14incrementValueEyx there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff0082dae98",
+            "original_size": 84,
+            "original_sha256": "7e7a472fbe2afa7b9c131c70eb5ebef2b0c30cb4e9104b3e48ab77643afa2daf",
+            "native_symbol": "_OSTestAndSet",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff0082dae98 in 21H16 call _OSTestAndSet there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff0082daeec",
+            "original_size": 84,
+            "original_sha256": "9fbea91d137fd7eb28145dc999e8730814745bf46d8586585a5edf2b7726d452",
+            "native_symbol": "_OSTestAndClear",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff0082daeec in 21H16 call _OSTestAndClear there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff0083b40fc",
+            "original_size": 168,
+            "original_sha256": "2332160e1205d06f6aac63da98696ae582a76412f3b0ee5ad8253013106ca0f4",
+            "native_symbol": "__ZN12IODMACommandD2Ev",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff0083b40fc in 21H16 call __ZN12IODMACommandD2Ev there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff007d4e160",
+            "original_size": 160,
+            "original_sha256": "04b4e53b68595db2745d9f3ad13a2889546b532b646605c06a7cd495e6cd7c6b",
+            "native_symbol": "_ptrauth_utils_sign_blob_generic",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff007d4e160 in 21H16 call _ptrauth_utils_sign_blob_generic there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff007eda11c",
+            "original_size": 40,
+            "original_sha256": "3e0e1de2becb9dae075d20f18c3354b6b5b93b0e4e9db98f725a69620cc8d37f",
+            "native_symbol": "_memchr",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff007eda11c in 21H16 call _memchr there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff007ee4430",
+            "original_size": 192,
+            "original_sha256": "f7b56fe131524ef8b66d575a9b8d79bb034b8b267ef21fca3be5dde08777326d",
+            "native_symbol": "_buf_map_range",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff007ee4430 in 21H16 call _buf_map_range there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff007f32c80",
+            "original_size": 200,
+            "original_sha256": "c1d1b9fec6e94fba494a99ab6e57de41709d1bebef5c9f2d645d41643667dc11",
+            "native_symbol": "_vnode_setmountedon",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff007f32c80 in 21H16 call _vnode_setmountedon there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff007f32d48",
+            "original_size": 200,
+            "original_sha256": "59cac9e2310a08447b69f3a7749ff6de88c0098fe0cd0459a916ad34385e641f",
+            "native_symbol": "_vnode_clearmountedon",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff007f32d48 in 21H16 call _vnode_clearmountedon there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff0083f168c",
+            "original_size": 100,
+            "original_sha256": "74c0c96690cc5af9c218fa5dacf170df4f629ec9822f96877585a87bc219ef6e",
+            "native_symbol": "__ZN12IOUserClient27copyObjectForPortNameInTaskEP4taskjPP8OSObject",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff0083f168c in 21H16 call __ZN12IOUserClient27copyObjectForPortNameInTaskEP4taskjPP8OSObject there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff0083b0570",
+            "original_size": 196,
+            "original_sha256": "a2f7e9341135af91bc8131bfd8cafde4e9f76fd8a0b114239ad7616b19a66a40",
+            "native_symbol": "__ZN24IOBufferMemoryDescriptorD2Ev",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff0083b0570 in 21H16 call __ZN24IOBufferMemoryDescriptorD2Ev there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           },
+           {
+            "original": "0xfffffff007ddd9b8",
+            "original_size": 216,
+            "original_sha256": "19cc4a4ab83ab54b01c890e5383b1cf3d7757bcc7b93c1e1a0a9102ce0f40a33",
+            "native_symbol": "_thread_call_allocate_with_priority",
+            "evidence": "Paired in Kerfand boot (2) kernel: the same bundle-relative BL sites that target 0xfffffff007ddd9b8 in 21H16 call _thread_call_allocate_with_priority there; the CI reference (different LTO reference build) left it to _unixnu_fileset_unmapped. IOStorageFamily looping on bdevsw_isfree returning 0 panicked at 64 unmapped calls (fuxi boot 2026-11-12 15:46)."
+           }
+          ]
+          JSON
+          python3 - kits/XnuPrelink/fixtures/fileset-21H16-symbols.json "$RUNNER_TEMP/fixture-adds.json" <<'PY'
+          import json, sys
+          p = sys.argv[1]; f = json.load(open(p)); adds = json.load(open(sys.argv[2]))
+          have = {e['original'] for e in f['functions']}
+          new = [e for e in adds if e['original'] not in have]
+          f['functions'].extend(new)
+          json.dump(f, open(p, 'w'), indent=2); open(p, 'a').write('\n')
+          print('fixture: added', len(new), 'of', len(adds), '; functions now', len(f['functions']))
+          PY
+
       - name: device and device-ios17
         run: |
           cp -R kerfand/device device
