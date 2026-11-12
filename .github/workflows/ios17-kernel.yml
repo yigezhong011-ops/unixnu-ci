@@ -127,6 +127,12 @@ jobs:
           # Kerfand published device/ as plain files; the build scripts read 'git rev-parse HEAD' of the device and its
           # driver checkouts (submodules upstream): give each one a single local commit.
           export GIT_COMMITTER_NAME=ci GIT_COMMITTER_EMAIL=ci@localhost GIT_AUTHOR_NAME=ci GIT_AUTHOR_EMAIL=ci@localhost
+          # QcomXnuUsbDebug: prepare-fuxi-usb-debug.py insists on HEAD == its pinned revision. Use the real checkout at that
+          # revision with Kerfand's files laid over it (HEAD stays the pin; any local edits remain as working-tree changes).
+          QUD=$(sed -n "s/^QUD_REVISION = '\([0-9a-f]*\)'.*/\1/p" device/scripts/prepare-fuxi-usb-debug.py)
+          git clone -q https://github.com/xiaoleGun/QcomXnuUsbDebug.git "$RUNNER_TEMP/qud" && git -C "$RUNNER_TEMP/qud" checkout -q "$QUD"
+          cp -R device/drivers/QcomXnuUsbDebug/. "$RUNNER_TEMP/qud/"; rm -rf device/drivers/QcomXnuUsbDebug; mv "$RUNNER_TEMP/qud" device/drivers/QcomXnuUsbDebug
+          echo "QcomXnuUsbDebug at $(git -C device/drivers/QcomXnuUsbDebug rev-parse --short HEAD), changed files: $(git -C device/drivers/QcomXnuUsbDebug status --short | wc -l)"
           for r in device/drivers/*/ device/kits/*/ device; do
             [ -d "$r" ] || continue
             [ -e "$r/.git" ] && continue
