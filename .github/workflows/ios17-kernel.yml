@@ -57,12 +57,21 @@ jobs:
           ref: ${{ inputs.kerfand_ref }}
           path: kerfand
           persist-credentials: false
+      # Authenticated checkout (anonymous partial clones from the runner were refused: "could not read Username").
+      - uses: actions/checkout@v4
+        with:
+          repository: SadNutWall/UniXNU
+          ref: ${{ inputs.unixnu_base }}
+          path: UniXNU
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
       - name: UniXNU at the base commit
         run: |
-          git clone --filter=blob:none https://github.com/SadNutWall/UniXNU.git UniXNU
-          git -C UniXNU checkout -q "${{ inputs.unixnu_base }}"
-          git -C UniXNU submodule update --init --recursive --jobs 8 || echo "some submodules failed: listed below"
+          git -C UniXNU log -1 --format='%h %s'
           git -C UniXNU submodule status | grep '^-' || true
+          # The submodule fetches below (Kerfand's pins) need history: unshallow what is shallow.
+          git -C UniXNU submodule foreach --quiet 'git rev-parse --is-shallow-repository | grep -q true && git fetch -q --unshallow || true' || true
 
       - name: apply Kerfand's changes
         working-directory: UniXNU
