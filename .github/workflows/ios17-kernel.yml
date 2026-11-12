@@ -139,6 +139,32 @@ jobs:
             git -C "$r" init -q && git -C "$r" add -A && git -C "$r" commit -q -m "Kerfand ${{ inputs.kerfand_ref }}" && echo "git: $r"
           done
 
+      - name: VerifiedRoot inputs (header-only)
+        env:
+          VROOT_INPUTS: ${{ secrets.VROOT_INPUTS }}
+        run: |
+          # The two signed root policies and the trusted public key of the flashed 21H16 root (taken from the boot (2).img
+          # kernel), from a secret. The block-hash tables stay in userdata ("<window>.hashes"); the build only needs the
+          # headers, so build-ios17-verified-root.py is switched to header-only inputs and zero self-test samples.
+          V="$RUNNER_TEMP/vroot"; mkdir -p "$V"; printf '%s' "$VROOT_INPUTS" | base64 -d | tar -xzf - -C "$V"; ls -la "$V"/os
+          echo "VERIFIED_ROOT_DIR=$V" >> "$GITHUB_ENV"
+          python3 - device-ios17/scripts/build-ios17-verified-root.py <<'PY'
+          import re, sys
+          p = sys.argv[1]; t = open(p).read()
+          a = t.index("    manifest = (policy / 'manifest.bin').read_bytes()")
+          b = t.index("the signed header does not carry the table digest')") + len("the signed header does not carry the table digest')")
+          t = t[:a] + "    image_bytes = struct.unpack_from('<Q', header, 24)[0]; block_count = (image_bytes + 4095) // 4096" + t[b:]
+          t = t.replace("table_bytes=len(manifest) - 544, table_sha256=hashlib.sha256(manifest[544:]).hexdigest(),",
+                        "table_bytes=block_count * 32, table_sha256='',")
+          a = t.index("report = json.loads(IMAGE.with_name('userdata-root.json').read_text())")
+          b = t.index("samples.write_bytes(data)") + len("samples.write_bytes(data)")
+          t = t[:a] + ("count = records[0]['block_count']\nindices = [0, 1, count // 2, count - 1]\n"
+                       "lengths = [4096, 4096, 4096, records[0]['image_bytes'] - (count - 1) * 4096]\n"
+                       "samples = out / 'original-samples.bin'\nsamples.write_bytes(bytes(4 * 4096))") + t[b:]
+          assert 'manifest' not in t.split('records, key = [], None')[1].split('os_head')[0].replace('_manifest', ''), 'manifest use left'
+          open(p, 'w').write(t); print('header-only patch applied')
+          PY
+
       - name: tools
         run: |
           brew install vulkan-headers vulkan-loader dtc llvm lld cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup age unifdef blacktop/tap/ipsw
