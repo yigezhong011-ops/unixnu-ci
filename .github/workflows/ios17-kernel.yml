@@ -664,7 +664,21 @@ jobs:
           PPATCH
           n=0
           for f in $(find device device-ios17 -name Ios17LegacyDisplayProbe.cpp -type f); do
-            patch -N --no-backup-if-mismatch "$f" < "$RUNNER_TEMP/shot.patch"; n=$((n+1)); done
+            patch -N --no-backup-if-mismatch "$f" < "$RUNNER_TEMP/shot.patch"; n=$((n+1))
+            # The display probe is compiled without the QUD include path (run 16): declare the three items inline,
+            # copied from QcomXnuUsbDebug/include/QcomUsbScreenshot.h.
+            python3 - "$f" <<'PY'
+          import sys
+          p = sys.argv[1]; s = open(p).read()
+          inc = '#include "QcomUsbScreenshot.h"\n'
+          decl = ('enum qcom_usb_framebuffer_format { QCOM_USB_BGRA8888 = 1, QCOM_USB_RGBA8888 = 2 };\n'
+                  'struct qcom_usb_framebuffer { const volatile uint8_t *pixels; size_t bytes; uint32_t width, height, stride;\n'
+                  '    enum qcom_usb_framebuffer_format format; };\n'
+                  'extern "C" int qcom_usb_debug_register_framebuffer(const struct qcom_usb_framebuffer *framebuffer);\n')
+          assert s.count(inc) == 1, p
+          open(p, "w").write(s.replace(inc, decl, 1))
+          PY
+          done
           for d in $(find device device-ios17 -path "*QcomXnuUsbDebug/kernel/QcomXnuUsbDebug.c" -type f | sed "s#/kernel/QcomXnuUsbDebug.c##"); do
             (cd "$d" && patch -p1 -N --no-backup-if-mismatch < "$RUNNER_TEMP/touch-kernel.patch"); n=$((n+1)); done
           for d in $(find device device-ios17 -path "*package/TouchProbe.cpp" -type f | sed "s#/package/TouchProbe.cpp##"); do
