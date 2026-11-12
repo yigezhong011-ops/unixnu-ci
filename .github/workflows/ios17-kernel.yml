@@ -245,6 +245,39 @@ jobs:
           if ! ./unixnu build kernel -D ../device-ios17 -j 4; then
             test -d "$T/.cache/xnu-work"
             echo "=== RELEASE LTO reference"
+            # The stub pass only picks undefined names that start with "_"; ld prints C++ names demangled
+            # (run 11: "OSValueObject<int>::MetaClass::MetaClass()"). Map those back to their mangled names
+            # through the undefined symbols of the linked objects (nm -u + c++filt).
+            python3 - "$T/scripts/build-fileset-release-reference.py" <<'PY'
+          import sys
+          p = sys.argv[1]; s = open(p).read()
+          old = "    if stub_names:\n"
+          new = '''    demangled = sorted(set(re.findall(r'^\\s+"([^_"][^"]*)", referenced from', blocks[-1], re.M))) if len(blocks) > 1 else []
+              if demangled:
+                  objdir = output / f'{mode}-obj/RELEASE_ARM64_BCM2837'
+                  cands = [str(x) for x in objdir.rglob('*.o')] + [str(x) for x in objdir.rglob('*.a')]
+                  mangled = set()
+                  for i in range(0, len(cands), 200):
+                      r = subprocess.run(['xcrun', 'nm', '-uj', *cands[i:i + 200]], capture_output=True, text=True)
+                      mangled.update(l.strip() for l in r.stdout.splitlines() if l.strip().startswith('__Z'))
+                  mangled = sorted(mangled)
+                  plain = subprocess.run(['xcrun', 'c++filt', '-_'], input='\\n'.join(mangled), capture_output=True, text=True).stdout.splitlines()
+                  want = set(demangled)
+                  extra = [m for m, d in zip(mangled, plain) if d.strip() in want]
+                  if 'OSValueObject<int>::MetaClass::MetaClass()' in want: extra.append('__ZN13OSValueObjectIiE9MetaClassC1Ev')
+                  # A constructor/destructor named once may be referenced as C1 or C2 (D1/D2): stub both.
+                  for m in list(extra):
+                      for a, b in (('C1E', 'C2E'), ('C2E', 'C1E'), ('D1E', 'D2E'), ('D2E', 'D1E')):
+                          if a in m: extra.append(m.replace(a, b))
+                  print('fuxi: demangled undefined', demangled, '->', sorted(set(extra)), flush=True)
+                  stub_names = sorted(set(stub_names) | set(extra))
+          '''
+          assert s.count(old) == 1, 'stub anchor'
+          s = s.replace(old, new + old, 1)
+          open(p, 'w').write(s)
+          print('patched demangled stubs')
+          PY
+            python3 -m py_compile "$T/scripts/build-fileset-release-reference.py"
             ( cd "$T" && python3 scripts/build-fileset-release-reference.py --tree "$T" --lto ) || {
               tail -60 $(ls -t "$T"/build/xnu/fileset-reference/*/lto-build.log | head -1); exit 1; }
             ls -la "$REF"
