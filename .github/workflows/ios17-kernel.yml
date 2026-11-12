@@ -237,7 +237,23 @@ jobs:
           export UNIXNU_OUT="$PWD/out-ios17" UNIXNU_KERNELCACHE="$PWD/out-ios17/ipsw/21H16/kernelcache.decompressed"
           [ -f ../device/scripts/extract-files.py ] && python3 ../device/scripts/extract-files.py --device ../device || echo "extract-files skipped/failed"
           ./unixnu defconfig fuxi_ios17_kernel_defconfig -D ../device-ios17
-          ./unixnu build kernel -D ../device-ios17 -j 4
+          T="$PWD/out-ios17/fuxi/tree"
+          REF="$T/build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf"
+          # The prelink step matches against a symbol-bearing RELEASE (LTO) comparison kernel built from the same xnu
+          # tree (Kerfand builds it once and reuses it). First pass: assemble the tree and build everything up to the
+          # prelink, which fails without the reference; then build the reference, then the kernel again.
+          if ! ./unixnu build kernel -D ../device-ios17 -j 4; then
+            test -d "$T/.cache/xnu-work"
+            echo "=== RELEASE LTO reference"
+            ( cd "$T" && python3 scripts/build-fileset-release-reference.py --tree "$T" --lto ) || {
+              tail -60 $(ls -t "$T"/build/xnu/fileset-reference/*/lto-build.log | head -1); exit 1; }
+            ls -la "$REF"
+            cp "$REF" "$RUNNER_TEMP/reference.noctf"
+            ./unixnu build kernel -D ../device-ios17 -j 4 || {
+              # The tree may have been reassembled without the reference: put it back once more and retry.
+              mkdir -p "$(dirname "$REF")"; cp "$RUNNER_TEMP/reference.noctf" "$REF"
+              ./unixnu build kernel -D ../device-ios17 -j 4; }
+          fi
           find out-ios17 -name kernel.macho -print
 
       - name: encrypt and upload
