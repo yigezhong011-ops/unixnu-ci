@@ -148,6 +148,28 @@ jobs:
             git -C "$r" init -q && git -C "$r" add -A && git -C "$r" commit -q -m "Kerfand ${{ inputs.kerfand_ref }}" && echo "git: $r"
           done
 
+      - name: authenticated firmware blob downloads
+        run: |
+          # fuxi_adreno_common.py fetches the pinned fuxi firmware blobs from api.github.com anonymously; shared runner
+          # IPs hit the 60/h limit (run 12: HTTP 403 rate limit exceeded). Send the job's own token (GITHUB_TOKEN env,
+          # set on the kernel step) when present; blobs stay SHA-checked by the script.
+          n=0
+          for f in $(find device device-ios17 -name fuxi_adreno_common.py -type f); do
+          python3 - "$f" <<'PY'
+          import sys
+          p = sys.argv[1]; s = open(p).read()
+          old = "                'Accept': 'application/vnd.github.raw+json',\n            })\n"
+          new = old + "            if os.environ.get('GITHUB_TOKEN'):\n                request.add_header('Authorization', 'Bearer ' + os.environ['GITHUB_TOKEN'])\n"
+          assert s.count(old) == 1, p
+          s = s.replace(old, new, 1)
+          if '\nimport os' not in s and 'import os,' not in s and ', os' not in s.split('\n\n')[0]:
+              s = 'import os\n' + s if not s.startswith('#!') else s.replace('\n', '\nimport os\n', 1)
+          open(p, 'w').write(s)
+          PY
+          python3 -m py_compile "$f"; echo "patched $f"; n=$((n+1))
+          done
+          test $n -ge 1
+
       - name: skip the QUD host model test
         run: |
           # QcomXnuUsbDebug's tests/check.py (host models: buffer, transport, PNG) trips one assertion on this runner
@@ -229,6 +251,7 @@ jobs:
       - name: kernel
         working-directory: UniXNU
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           UNIXNU_XNU_ARCH: arm64e
           UNIXNU_FILESET_KERNEL_FIRST: 1
           XNU_KERNEL_CHAINED_FIXUPS: 1
