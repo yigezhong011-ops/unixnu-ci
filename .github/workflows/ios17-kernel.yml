@@ -139,6 +139,14 @@ jobs:
             git -C "$r" init -q && git -C "$r" add -A && git -C "$r" commit -q -m "Kerfand ${{ inputs.kerfand_ref }}" && echo "git: $r"
           done
 
+      - name: uefi-fuxi (pinned fuxi.dtb, read only)
+        run: |
+          # prepare-fuxi-gmu.py and friends read ../uefi-fuxi/Resources/DTBs/fuxi.dtb (pinned sha 0590a46c...).
+          git clone -q --filter=blob:none https://github.com/ljhhkx529/uefi-fuxi.git uefi-fuxi
+          git -C uefi-fuxi checkout -q 57969ab77d36a982261daef16592741ed4a1d811
+          shasum -a 256 uefi-fuxi/Resources/DTBs/fuxi.dtb
+          echo "FUXI_DTB=$GITHUB_WORKSPACE/uefi-fuxi/Resources/DTBs/fuxi.dtb" >> "$GITHUB_ENV"
+
       - name: VerifiedRoot inputs (header-only)
         env:
           VROOT_INPUTS: ${{ secrets.VROOT_INPUTS }}
