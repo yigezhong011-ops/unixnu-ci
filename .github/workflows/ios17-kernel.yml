@@ -265,6 +265,88 @@ jobs:
             git -C "$r" init -q && git -C "$r" add -A && git -C "$r" commit -q -m "Kerfand ${{ inputs.kerfand_ref }}" && echo "git: $r"
           done
 
+      - name: skip Setup (Hello) with sheng-skip-setup=1
+        run: |
+          # Hello is skipped through Data preferences (Kerfand seed-data-skip-setup.py, a Mac-side seed edit). Our Data starts empty,
+          # so the kernel writes the same preferences at boot, beside sheng-data-skel, when sheng-skip-setup=1 (absent files only).
+          cat > "$RUNNER_TEMP/skip-setup.c" <<'CSRC'
+          // fuxi: sheng-skip-setup=1 writes Setup's completion preferences when they are absent, for a Data that was not made from a
+          // skip-setup seed. Keys are the ones Kerfand's scripts/seed-data-skip-setup.py merges (ios-sweet sweet-root-tweaks.py).
+          // Missing directories are created mobile:mobile 0755; files are mobile:mobile 0600; existing files are left alone.
+          #define SKIP_PL_HEAD "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>"
+          #define SKIP_PL_TAIL "</dict></plist>\n"
+          static const char *const sheng_skip_dirs[]={
+           "/private/var/mobile","/private/var/mobile/Library","/private/var/mobile/Library/Preferences"};
+          static const char *const sheng_skip_files[][2]={
+           {"/private/var/mobile/Library/Preferences/com.apple.purplebuddy.plist",
+            SKIP_PL_HEAD "<key>SetupDone</key><true/><key>SetupFinishedAllSteps</key><true/><key>SetupVersion</key><integer>11</integer>"
+            "<key>daemonizeNeedsToRun</key><false/>" SKIP_PL_TAIL},
+           {"/private/var/mobile/Library/Preferences/com.apple.purplebuddy.notbackedup.plist",
+            SKIP_PL_HEAD "<key>ShouldRunDiagnosticsMiniBuddy</key><false/><key>ShouldRunHSA2MiniBuddy</key><false/>"
+            "<key>ShouldRunKeychainSyncMiniBuddy</key><false/><key>ShouldRunMesaMiniBuddy</key><false/><key>ShouldRunPaymentMiniBuddy</key><false/>"
+            "<key>ShouldRunStandardMiniBuddy</key><false/><key>SilentICDPUpgrade</key><false/>" SKIP_PL_TAIL},
+           {"/private/var/mobile/Library/Preferences/com.apple.springboard.plist",
+            SKIP_PL_HEAD "<key>BKNoWatchdogs</key><true/><key>FBLaunchWatchdogExceptions</key><dict><key>com.apple.purplebuddy</key><real>100</real></dict>"
+            "<key>MCForceShowCloudConfigurationUI</key><false/>" SKIP_PL_TAIL},
+           {"/private/var/mobile/Library/Preferences/com.apple.managedconfiguration.notbackedup.plist",
+            SKIP_PL_HEAD "<key>LockdownActivationIndicatesCloudConfigurationAvailable</key><false/>" SKIP_PL_TAIL},
+           {"/private/var/mobile/Library/Preferences/com.apple.migration.plist",
+            SKIP_PL_HEAD "<key>LastSystemVersion</key><string>21H16</string><key>DMUserDataDisposition</key><dict>"
+            "<key>SyntheticDidUpgrade</key><false/><key>buildVersion</key><string>21H16</string></dict>" SKIP_PL_TAIL}};
+
+          static int sheng_boot_skip_setup(proc_t p,uint64_t scratch) {
+           int on=0;int32_t result=0;
+           if(!PE_parse_boot_argn("sheng-skip-setup",&on,sizeof(on)) || on!=1)return 0;
+           unsigned dirs=0,files=0,existing=0;int error=0;
+           for(unsigned i=0;!error && i<sizeof(sheng_skip_dirs)/sizeof(sheng_skip_dirs[0]);++i) {
+            error=copyout(sheng_skip_dirs[i],scratch,strlen(sheng_skip_dirs[i])+1);
+            if(error)break;
+            struct mkdir_args md={.path=scratch,.mode=0755};
+            error=mkdir(p,&md,&result);
+            if(error==EEXIST){error=0;continue;}
+            if(!error){++dirs;struct lchown_args own={.path=scratch,.owner=501,.group=501};error=lchown(p,&own,&result);}
+           }
+           for(unsigned i=0;!error && i<sizeof(sheng_skip_files)/sizeof(sheng_skip_files[0]);++i) {
+            const char *path=sheng_skip_files[i][0],*body=sheng_skip_files[i][1];
+            error=copyout(path,scratch,strlen(path)+1);
+            if(error)break;
+            struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,.mode=0600};
+            error=open(p,&op,&result);
+            if(error==EEXIST){error=0;++existing;continue;}
+            if(error)break;
+            int fd=result;size_t total=strlen(body);
+            for(size_t sent=0;!error && sent<total;) {
+             size_t piece=total-sent<0x1f0?total-sent:0x1f0;
+             error=copyout(body+sent,scratch+0x200,piece);
+             if(!error){struct write_args wr={.fd=fd,.cbuf=scratch+0x200,.nbyte=piece};user_ssize_t written=0;error=write(p,&wr,&written);
+              if(!error && written!=(user_ssize_t)piece)error=EIO;}
+             sent+=piece;
+            }
+            if(!error){struct fchown_args own={.fd=fd,.uid=501,.gid=501};error=fchown(p,&own,&result);}
+            if(!error){struct fchmod_args cm={.fd=fd,.mode=0600};error=fchmod(p,&cm,&result);}
+            struct close_args cl={.fd=fd};int ce=sys_close(p,&cl,&result);if(!error)error=ce;
+            if(!error)++files;
+           }
+           printf("sheng skip setup: dirs created %u, prefs written %u, existing %u, rc %d\n",dirs,files,existing,error);
+           return error;
+          }
+          CSRC
+          n=0
+          for f in $(find device device-ios17 -name BootWatchdogPolicy.c -type f); do
+          python3 - "$f" "$RUNNER_TEMP/skip-setup.c" <<'PY'
+          import sys
+          p = sys.argv[1]; s = open(p).read(); add = open(sys.argv[2]).read()
+          anchor = '// One comma-separated label at *c into the policy'
+          call = ' (void)sheng_boot_keychains(p,scratch);\n'
+          assert s.count(anchor) == 1 and s.count(call) == 1, p
+          s = s.replace(anchor, add + '\n\n' + anchor, 1)
+          s = s.replace(call, call + ' if(setup!=1)(void)sheng_boot_skip_setup(p,scratch);\n', 1)
+          open(p, 'w').write(s)
+          PY
+          n=$((n+1)); echo "patched $f"; grep -n "sheng_boot_skip_setup" "$f"
+          done
+          test $n -ge 1
+
       - name: authenticated firmware blob downloads
         run: |
           # fuxi_adreno_common.py fetches the pinned fuxi firmware blobs from api.github.com anonymously; shared runner
