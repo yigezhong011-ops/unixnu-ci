@@ -299,6 +299,17 @@ jobs:
            // 1 = write absent files only; 2 = rewrite all five on every boot (a persistent Data where Setup already created them).
            if(!PE_parse_boot_argn("sheng-skip-setup",&on,sizeof(on)) || (on!=1 && on!=2))return 0;
            unsigned dirs=0,files=0,existing=0;int error=0;
+           // launchd retries fopen(/private/var/log/com.apple.xpc.launchd/launchd.log) without end when the directory is missing;
+           // the error lines were 70% of the USB log and kept the transmitter full (control replies dropped). Root-owned, 0755.
+           static const char *const sheng_log_dirs[]={"/private/var/log","/private/var/log/com.apple.xpc.launchd"};
+           for(unsigned i=0;!error && i<sizeof(sheng_log_dirs)/sizeof(sheng_log_dirs[0]);++i) {
+            error=copyout(sheng_log_dirs[i],scratch,strlen(sheng_log_dirs[i])+1);
+            if(error)break;
+            struct mkdir_args md={.path=scratch,.mode=0755};
+            error=mkdir(p,&md,&result);
+            if(error==EEXIST){error=0;continue;}
+            if(!error)++dirs;
+           }
            for(unsigned i=0;!error && i<sizeof(sheng_skip_dirs)/sizeof(sheng_skip_dirs[0]);++i) {
             error=copyout(sheng_skip_dirs[i],scratch,strlen(sheng_skip_dirs[i])+1);
             if(error)break;
@@ -683,7 +694,109 @@ jobs:
             (cd "$d" && patch -p1 -N --no-backup-if-mismatch < "$RUNNER_TEMP/touch-kernel.patch"); n=$((n+1)); done
           for d in $(find device device-ios17 -path "*package/TouchProbe.cpp" -type f | sed "s#/package/TouchProbe.cpp##"); do
             (cd "$d" && patch -p1 -N --no-backup-if-mismatch < "$RUNNER_TEMP/touch-package.patch"); n=$((n+1)); done
-          echo "patched $n targets"; test $n -ge 3
+          # Screenshot buffer is 12 KiB in the iOS fileset: send a big fixed scanout directly, halved (qud-shot-direct.py).
+          # Replies were all dropped behind the log stream: queue first, wait up to 50 ms for room (qud-reply-room.py).
+          cat > "$RUNNER_TEMP/qud-shot-direct.py" <<'SHOTPY'
+          #!/usr/bin/env python3
+          """QcomUsbScreenshot.c: a fixed framebuffer too big for the copy buffer (iOS 17 fileset: 12 KiB) is sent directly from the
+          scanout mapping, halved in each direction, as raw RGB (no copy, no RLE, crc32 0). Small framebuffers keep the old copy path,
+          so the module's own tests are unchanged. Usage: qud-shot-direct.py <QcomUsbScreenshot.c>"""
+          import sys
+          p = sys.argv[1]
+          s = open(p).read()
+          def sub(old, new):
+              global s
+              assert s.count(old) == 1, old
+              s = s.replace(old, new, 1)
+          sub('static unsigned ready;\n',
+              'static unsigned ready;\n'
+              '/* Direct mode: read the fixed scanout at capture/peek time, every QUD_SHOT_DIRECT_STEP-th pixel and row. */\n'
+              '#define QUD_SHOT_DIRECT_STEP 2u\n'
+              'static unsigned direct;\n')
+          # register_framebuffer: accept any size up to the dimension limit; too big for the copy buffer -> direct mode.
+          sub('    if (!fb || !fb->pixels || !dimensions(fb->width, fb->height) ||\n',
+              '    if (!fb || !fb->pixels || !fb->width || !fb->height ||\n'
+              '        fb->width > QUD_SCREENSHOT_MAX_DIMENSION || fb->height > QUD_SCREENSHOT_MAX_DIMENSION ||\n')
+          sub('    fixed = *fb; provider = copy_fixed; provider_cookie = &fixed;\n',
+              '    fixed = *fb; provider = copy_fixed; provider_cookie = &fixed;\n'
+              '    direct = !dimensions(fb->width, fb->height);\n')
+          sub('    if (__atomic_load_n(&provider_state, __ATOMIC_ACQUIRE) != 2u) return -1;\n',
+              '    if (__atomic_load_n(&provider_state, __ATOMIC_ACQUIRE) != 2u) return -1;\n'
+              '    if (direct) {\n'
+              '        image.width = fixed.width / QUD_SHOT_DIRECT_STEP; image.height = fixed.height / QUD_SHOT_DIRECT_STEP;\n'
+              '        image.bytes = image.width * image.height * 3u; image.frame = frame; image.crc32 = 0;\n'
+              '        image.rle = 0; image.encoded_bytes = image.bytes;\n'
+              '        ready = 1;\n'
+              '        return 1;\n'
+              '    }\n')
+          sub('    if (image.rle) {\n',
+              '    if (direct) {\n'
+              '        n = image.encoded_bytes - cursor;\n'
+              '        if (n > capacity) n = capacity;\n'
+              '        for (size_t i = 0; i < n; ++i) {\n'
+              '            uint32_t b = cursor + (uint32_t)i, px = b / 3u, c = b % 3u;\n'
+              '            uint32_t x = (px % image.width) * QUD_SHOT_DIRECT_STEP, y = (px / image.width) * QUD_SHOT_DIRECT_STEP;\n'
+              '            const volatile uint8_t *row = fixed.pixels + (size_t)y * fixed.stride;\n'
+              '            uint32_t ch = c == 1u ? 1u : ((c == 0u) == (fixed.format == QCOM_USB_BGRA8888) ? 2u : 0u);\n'
+              '            out[i] = row[x * 4u + ch];\n'
+              '        }\n'
+              '    } else if (image.rle) {\n')
+          open(p, 'w').write(s)
+          print('direct screenshot patch applied', p)
+          SHOTPY
+          cat > "$RUNNER_TEMP/qud-reply-room.py" <<'REPLYPY'
+          #!/usr/bin/env python3
+          """QcomXnuUsbDebug.c: control replies were dropped on the iOS 17 run (no SXNU1R at all, contention climbing). The reply
+          queue drained the log backlog into the transmitter first and then needed room for the whole reply, so a busy log stream
+          always won. Queue the reply first, then drain the backlog, and wait up to 50 ms (thread context) for room before giving up.
+          Usage: qud-reply-room.py <QcomXnuUsbDebug.c>"""
+          import sys
+          p = sys.argv[1]
+          s = open(p).read()
+          def sub(old, new):
+              global s
+              assert s.count(old) == 1, old
+              s = s.replace(old, new, 1)
+          sub('static size_t control_reply_queue(const char *reply, size_t bytes)\n{\n',
+              'static size_t control_reply_queue_once(const char *reply, size_t bytes)\n{\n')
+          sub('    if (native.status.phase == QCOM_USB_DEBUG_ACTIVE) {\n'
+              '        backlog_drain_owned();\n'
+              '        if (DWC3_TX_BYTES - dwc3_queued(native.core) >= bytes + 1u) {\n'
+              '            wire[0] = (uint8_t)\'\\n\';\n'
+              '            bytes_copy(wire + 1u, reply, bytes);\n'
+              '            if (dwc3_queue(native.core, wire, bytes + 1u) == bytes + 1u) queued = 1;\n'
+              '        }\n'
+              '    }\n',
+              '    if (native.status.phase == QCOM_USB_DEBUG_ACTIVE) {\n'
+              '        if (DWC3_TX_BYTES - dwc3_queued(native.core) >= bytes + 1u) {\n'
+              '            wire[0] = (uint8_t)\'\\n\';\n'
+              '            bytes_copy(wire + 1u, reply, bytes);\n'
+              '            if (dwc3_queue(native.core, wire, bytes + 1u) == bytes + 1u) queued = 1;\n'
+              '        }\n'
+              '        backlog_drain_owned();\n'
+              '    }\n')
+          sub('    if (queued) (void)__atomic_add_fetch(&control_reply_count, 1u, __ATOMIC_RELAXED);\n'
+              '    return queued ? bytes : 0;\n'
+              '}\n',
+              '    if (queued) (void)__atomic_add_fetch(&control_reply_count, 1u, __ATOMIC_RELAXED);\n'
+              '    return queued ? bytes : 0;\n'
+              '}\n'
+              'static size_t control_reply_queue(const char *reply, size_t bytes)\n'
+              '{\n'
+              '    for (unsigned int n = 0; n < 500u; ++n) {\n'
+              '        size_t q = control_reply_queue_once(reply, bytes);\n'
+              '        if (q || native.status.phase != QCOM_USB_DEBUG_ACTIVE) return q;\n'
+              '        delay_us(0, 100);\n'
+              '    }\n'
+              '    return 0;\n'
+              '}\n')
+          open(p, 'w').write(s)
+          print('reply room patch applied', p)
+          REPLYPY
+          for d in $(find device device-ios17 -path "*QcomXnuUsbDebug/kernel/QcomXnuUsbDebug.c" -type f | sed "s#/kernel/QcomXnuUsbDebug.c##"); do
+            python3 "$RUNNER_TEMP/qud-shot-direct.py" "$d/kernel/QcomUsbScreenshot.c"
+            python3 "$RUNNER_TEMP/qud-reply-room.py" "$d/kernel/QcomXnuUsbDebug.c"; n=$((n+1)); done
+          echo "patched $n targets"; test $n -ge 4
           grep -rn "qcom_usb_debug_register_framebuffer(&" device device-ios17 --include=*.cpp | head -3
           grep -rn "fuxi_touch_inject" device device-ios17 --include=*.c --include=*.cpp | head -5
 
