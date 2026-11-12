@@ -124,6 +124,14 @@ jobs:
           H
           fi
           ls -la device-ios17 | head -20
+          # Kerfand published device/ as plain files; the build scripts read 'git rev-parse HEAD' of the device and its
+          # driver checkouts (submodules upstream): give each one a single local commit.
+          export GIT_COMMITTER_NAME=ci GIT_COMMITTER_EMAIL=ci@localhost GIT_AUTHOR_NAME=ci GIT_AUTHOR_EMAIL=ci@localhost
+          for r in device/drivers/*/ device/kits/*/ device; do
+            [ -d "$r" ] || continue
+            [ -e "$r/.git" ] && continue
+            git -C "$r" init -q && git -C "$r" add -A && git -C "$r" commit -q -m "Kerfand ${{ inputs.kerfand_ref }}" && echo "git: $r"
+          done
 
       - name: tools
         run: |
