@@ -296,7 +296,8 @@ jobs:
 
           static int sheng_boot_skip_setup(proc_t p,uint64_t scratch) {
            int on=0;int32_t result=0;
-           if(!PE_parse_boot_argn("sheng-skip-setup",&on,sizeof(on)) || on!=1)return 0;
+           // 1 = write absent files only; 2 = rewrite all five on every boot (a persistent Data where Setup already created them).
+           if(!PE_parse_boot_argn("sheng-skip-setup",&on,sizeof(on)) || (on!=1 && on!=2))return 0;
            unsigned dirs=0,files=0,existing=0;int error=0;
            for(unsigned i=0;!error && i<sizeof(sheng_skip_dirs)/sizeof(sheng_skip_dirs[0]);++i) {
             error=copyout(sheng_skip_dirs[i],scratch,strlen(sheng_skip_dirs[i])+1);
@@ -310,7 +311,7 @@ jobs:
             const char *path=sheng_skip_files[i][0],*body=sheng_skip_files[i][1];
             error=copyout(path,scratch,strlen(path)+1);
             if(error)break;
-            struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,.mode=0600};
+            struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_NOFOLLOW|(on==2?O_TRUNC:O_EXCL),.mode=0600};
             error=open(p,&op,&result);
             if(error==EEXIST){error=0;++existing;continue;}
             if(error)break;
@@ -346,6 +347,331 @@ jobs:
           n=$((n+1)); echo "patched $f"; grep -n "sheng_boot_skip_setup" "$f"
           done
           test $n -ge 1
+
+      - name: USB automation patches (screenshot, TAP/SWP)
+        run: |
+          # Screenshot: register the legacy display scanout with QcomXnuUsbDebug (no provider was registered: SCREENSHOT
+          # answered unavailable). TAP/SWP: new control verbs calling fuxi_touch_inject in TouchProbe.cpp, which publishes
+          # synthetic contacts through native_touch_publish (the FTM5 path). Drafted by DeepSeek, reviewed and fixed by Claude.
+          cat > "$RUNNER_TEMP/shot.patch" <<'SHOTPATCH'
+          USB 截图注册补丁（DeepSeek 2026-11-12，未推送）
+          =================================================
+
+          改哪个文件
+          ----------
+              ios17/scripts/data/Ios17LegacyDisplayProbe.cpp
+
+          由 ios17/scripts/build-ios17-legacy-display.py:307 编进
+          build/native-legacy-display/libNativeLegacyDisplay.late.a。
+
+          为什么选那一点
+          --------------
+          函数 native_legacy_gop_mapping_observed(IOService *, IOMemoryMap *, width, height)
+          （第 178 行）是唯一同时拿到四样东西的地方（第 183-185 行）：
+
+              scanout CPU VA  <-  mapping->getVirtualAddress()
+              字节数          <-  mapping->getLength()
+              宽 / 高         <-  参数 width / height
+              stride          <-  gScanoutStride = getLength() / height
+
+          它在 NativeLegacyDisplay 完成 GOP framebuffer 映射后被调用一次；
+          映射本身保留到复位（gScanout 后面还要用来拷贝），满足
+          QcomUsbScreenshot.h:32 的 "cookie/mapping stays valid until reset"。
+
+          头文件 / 链接依赖（QUD 和显示驱动是不是同一个 kext/归档）
+          --------------------------------------------------------
+          是同一个 xnu 链接，可以直接调用。ios17/configs/fuxi_ios17_kernel_defconfig：
+
+              L51: CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y     <- 显示归档进链接
+              L46: CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/boot-log/libBootLog.a
+                                                  {tree}/.cache/fuxi-qud-build/libQcomXnuUsbDebug.a
+                                                  -Wl,-force_load,{tree}/build/ios17-stubs/libIos17Stubs.a"
+
+          libQcomXnuUsbDebug.a（ios17/scripts/build-fuxi-usb-debug.py:148 产出）排在显示归档之后，
+          ld 会为前面归档的未定义符号回查后面的归档，不需要额外链接选项。
+          唯一要补的是编译参数里的 -I <device>/drivers/QcomXnuUsbDebug/include
+          （如果 build-ios17-legacy-display.py 的 probe 编译参数里还没有）。
+
+          API 与约束（QcomUsbScreenshot.h:22-40 + docs/control-and-screenshot.md）
+          ----------------------------------------------------------------------
+              enum qcom_usb_framebuffer_format { QCOM_USB_BGRA8888 = 1, QCOM_USB_RGBA8888 = 2 };
+              struct qcom_usb_framebuffer {
+                  const volatile uint8_t *pixels;   /* Existing CPU mapping, never a PA/IOVA */
+                  size_t bytes;
+                  uint32_t width, height, stride;
+                  enum qcom_usb_framebuffer_format format;
+              };
+              int qcom_usb_debug_register_framebuffer(const struct qcom_usb_framebuffer *);
+
+            - stride 是每行字节数，至少 width*4
+            - 描述结构会被复制，但像素映射必须保留到复位（不能 unmap）
+            - 只支持 BGRA8888 / RGBA8888；"One provider, registered once"
+            - 回调在正常 USB worker 里跑，不在 panic 上下文
+
+          为什么是 BGRA8888
+          -----------------
+          同文件 sample_scanout()（124-148 行）读像素的方式是
+          b = px & 0xff, g = (px >> 8) & 0xff, r = (px >> 16) & 0xff，即 32 位小端 BGRX。
+
+          已知限制
+          --------
+          - 只在第一次映射时注册（static bool），符合 "registered once"
+          - 裸注册不冻结显示，截图可能撕裂（头文件第 38 行明说）；
+            要无缝截图改用 qcom_usb_debug_register_screenshot(capture_rgb, ...) 自定义 provider
+          - 函数只在 CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y 时编进来（当前 iOS 17 配置就是 y）
+          - 本补丁**没有编译验证**（本机无 macOS）
+          - git apply --check 已在本机对真实文件验证通过（forward + reverse）
+
+          --------------------------------------------------------------------
+
+          diff --git a/ios17/scripts/data/Ios17LegacyDisplayProbe.cpp b/ios17/scripts/data/Ios17LegacyDisplayProbe.cpp
+          index 995733b..537ff88 100644
+          --- a/ios17/scripts/data/Ios17LegacyDisplayProbe.cpp
+          +++ b/ios17/scripts/data/Ios17LegacyDisplayProbe.cpp
+          @@ -5,6 +5,7 @@
+           // boot-progress scanout arbitration, no user-client interposition. Observation hooks only count and log.
+           #include <IOKit/IOPlatformExpert.h>
+           #include <IOKit/IODeviceMemory.h>
+          +#include "QcomUsbScreenshot.h"
+           #include <IOKit/IODeviceTreeSupport.h>
+           #include <IOKit/IOLib.h>
+           #include <IOKit/IOUserClient.h>
+          @@ -183,6 +184,26 @@ __attribute__((noinline)) bool native_legacy_gop_mapping_observed(IOService *obj
+           	gScanout = (volatile uint32_t *)(uintptr_t)mapping->getVirtualAddress();
+           	gScanoutW = width; gScanoutH = height; gScanoutStride = (uint32_t)(mapping->getLength() / (height ? height : 1));
+           	sample_scanout("at-mapping");
+          +	/* Register the GOP scanout with the USB debug console once, so SCREENSHOT and
+          +	 * SHOTNEXT can read the panel. The registration copies the descriptor but keeps
+          +	 * the pixel mapping, which gScanout already holds until reset, as
+          +	 * qcom_usb_debug_register_framebuffer requires. Plain registration does not
+          +	 * freeze the display, so a shot taken during a copy can tear; a custom
+          +	 * qcom_usb_debug_register_screenshot provider would fix that.
+          +	 */
+          +	static bool screenshotRegistered;
+          +	if (!screenshotRegistered) {
+          +		struct qcom_usb_framebuffer framebuffer = {};
+          +		framebuffer.pixels = (const volatile uint8_t *)(uintptr_t)mapping->getVirtualAddress();
+          +		framebuffer.bytes = (size_t)mapping->getLength();
+          +		framebuffer.width = width;
+          +		framebuffer.height = height;
+          +		framebuffer.stride = gScanoutStride;
+          +		framebuffer.format = QCOM_USB_BGRA8888;
+          +		const int registered = qcom_usb_debug_register_framebuffer(&framebuffer);
+          +		printf("ios17 legacy display: usb screenshot register %d\n", registered);
+          +		screenshotRegistered = registered == 1;
+          +	}
+           	unsigned enabled = 0; PE_parse_boot_argn("offline-legacy-unit-scale", &enabled, sizeof(enabled));
+           	if (!enabled) return true;
+           	unsigned phase = 0; PE_parse_boot_argn("offline-legacy-phase", &phase, sizeof(phase));
+          SHOTPATCH
+          cat > "$RUNNER_TEMP/touch-kernel.patch" <<'KPATCH'
+          diff --git a/kernel/QcomUsbControl.h b/kernel/QcomUsbControl.h
+          index 390cae4..39c5b63 100644
+          --- a/kernel/QcomUsbControl.h
+          +++ b/kernel/QcomUsbControl.h
+          @@ -27,14 +27,23 @@ enum sxnu_control_verb {
+               SXNU_CONTROL_VERB_SCREENSHOT,
+               SXNU_CONTROL_VERB_SHOTNEXT,
+               /* Asks the reset layer for the bootloader target instead of a plain reset. */
+          -    SXNU_CONTROL_VERB_REBOOT_FASTBOOT
+          +    SXNU_CONTROL_VERB_REBOOT_FASTBOOT,
+          +    /* Synthetic touch, so an unattended run can drive the UI without a finger.
+          +     * TAP <x> <y>; SWP <x0> <y0> <x1> <y1> <ms>. Arguments follow the verb token. */
+          +    SXNU_CONTROL_VERB_TAP,
+          +    SXNU_CONTROL_VERB_SWIPE
+           };
+           
+          +/* Longest argument list a frame may carry: SWP uses five. */
+          +#define SXNU_CONTROL_ARGS 5u
+          +
+           struct sxnu_control_frame {
+               uint64_t session;
+               uint32_t seq;
+               uint32_t crc;
+               enum sxnu_control_verb verb;
+          +    uint32_t arg[SXNU_CONTROL_ARGS];
+          +    uint8_t nargs;
+           };
+           
+           struct sxnu_control_parser {
+          @@ -122,6 +131,10 @@ sxnu_control_parse_verb(const uint8_t *text, size_t bytes)
+               if (bytes == 8u && text[0] == 'S' && text[1] == 'H' && text[2] == 'O' &&
+                   text[3] == 'T' && text[4] == 'N' && text[5] == 'E' && text[6] == 'X' &&
+                   text[7] == 'T') return SXNU_CONTROL_VERB_SHOTNEXT;
+          +    if (bytes == 3u && text[0] == 'T' && text[1] == 'A' && text[2] == 'P')
+          +        return SXNU_CONTROL_VERB_TAP;
+          +    if (bytes == 3u && text[0] == 'S' && text[1] == 'W' && text[2] == 'P')
+          +        return SXNU_CONTROL_VERB_SWIPE;
+               return SXNU_CONTROL_VERB_INVALID;
+           }
+           
+          @@ -136,6 +149,8 @@ sxnu_control_verb_name(enum sxnu_control_verb verb)
+               case SXNU_CONTROL_VERB_SCREENSHOT: return "SCREENSHOT";
+               case SXNU_CONTROL_VERB_SHOTNEXT: return "SHOTNEXT";
+               case SXNU_CONTROL_VERB_REBOOT_FASTBOOT: return "REBOOT-FASTBOOT";
+          +    case SXNU_CONTROL_VERB_TAP: return "TAP";
+          +    case SXNU_CONTROL_VERB_SWIPE: return "SWP";
+               default: return "";
+               }
+           }
+          @@ -188,7 +203,10 @@ sxnu_control_parser_feed(struct sxnu_control_parser *parser, uint8_t byte,
+           
+           /* Strict grammar:
+            * SXNU1 <16hex session> <8hex seq> <HELLO|PING|STATUS|REBOOT|SCREENSHOT|SHOTNEXT> <8hex crc>
+          - * CRC-32/IEEE covers every byte before the space immediately before the CRC. */
+          + * SXNU1 <16hex session> <8hex seq> TAP <x> <y> <8hex crc>
+          + * SXNU1 <16hex session> <8hex seq> SWP <x0> <y0> <x1> <y1> <ms> <8hex crc>
+          + * CRC-32/IEEE covers every byte before the space immediately before the CRC, so the
+          + * arguments are covered too. Arguments are decimal, at most four digits each. */
+           static inline int
+           sxnu_control_parse(const char *line, size_t bytes, struct sxnu_control_frame *frame)
+           {
+          @@ -216,6 +234,34 @@ sxnu_control_parse(const char *line, size_t bytes, struct sxnu_control_frame *fr
+               verb = sxnu_control_parse_verb(p + verb_start, verb_bytes);
+               if (verb == SXNU_CONTROL_VERB_INVALID) return 0;
+               cursor++;
+          +
+          +    /* Optional decimal arguments between the verb and the CRC. The CRC covers them, so a
+          +     * frame with arguments cannot be forged without the same coverage. */
+          +    {
+          +        unsigned want = verb == SXNU_CONTROL_VERB_TAP ? 2u :
+          +                        verb == SXNU_CONTROL_VERB_SWIPE ? 5u : 0u;
+          +        unsigned got = 0;
+          +        while (got < want) {
+          +            uint64_t value = 0;
+          +            size_t digits = 0;
+          +            while (cursor < bytes && p[cursor] >= (uint8_t)'0' &&
+          +                   p[cursor] <= (uint8_t)'9' && digits < 4u) {
+          +                value = value * 10u + (uint64_t)(p[cursor] - (uint8_t)'0');
+          +                digits++;
+          +                cursor++;
+          +            }
+          +            if (!digits) return 0;
+          +            frame->arg[got++] = (uint32_t)value;
+          +            if (got < want) {
+          +                if (cursor >= bytes || p[cursor] != (uint8_t)' ') return 0;
+          +                cursor++;
+          +            }
+          +        }
+          +        frame->nargs = (uint8_t)got;
+          +    }
+          +
+          +    if (cursor >= bytes || p[cursor] != (uint8_t)' ') return 0;
+          +    cursor++;
+               crc_start = cursor;
+               if (crc_start > bytes || bytes - crc_start != SXNU_CONTROL_CRC_HEX) return 0;
+               if (!sxnu_control_parse_hex(p + crc_start, SXNU_CONTROL_CRC_HEX, &crc)) return 0;
+          diff --git a/kernel/QcomXnuUsbDebug.c b/kernel/QcomXnuUsbDebug.c
+          index d27538b..7c045fe 100644
+          --- a/kernel/QcomXnuUsbDebug.c
+          +++ b/kernel/QcomXnuUsbDebug.c
+          @@ -5,6 +5,11 @@
+           #include "QcomXnuUsbDebug.h"
+           #include "QcomUsbBuffer.h"
+           #include "QcomUsbControl.h"
+          +
+          +/* Synthetic touch entry, provided by the board's touch driver (package/TouchProbe.cpp).
+          + * Arguments are screen points on the 360x800 panel; returns 0 when the injection ran. */
+          +extern int fuxi_touch_inject(int x0, int y0, int x1, int y1, int steps, int milliseconds)
+          +    __attribute__((weak_import));
+           #include "QcomUsbScreenshot.h"
+           #include "../usb/Dwc3.h"
+           #include "../soc/QcomUsbQualify.h"
+          @@ -1040,6 +1045,29 @@ static void control_handle_frame(const struct sxnu_control_frame *frame,
+                   reply_bytes = sxnu_control_reply_finish(&writer);
+                   break;
+               }
+          +    case SXNU_CONTROL_VERB_TAP:
+          +    case SXNU_CONTROL_VERB_SWIPE: {
+          +        /* The touch driver owns the report path, so it registers this entry and QUD only
+          +         * calls it. A weak import keeps an image without the driver linkable. */
+          +        int injected = -1;
+          +        if (fuxi_touch_inject) {
+          +            if (accepted == SXNU_CONTROL_VERB_TAP)
+          +                /* One step plus a short hold: a zero-length press can fall between two frames
+          +                 * of the event driver and be dropped. 80 ms is a human tap. */
+          +                injected = fuxi_touch_inject(frame->arg[0], frame->arg[1],
+          +                                             frame->arg[0], frame->arg[1], 1, 80);
+          +            else
+          +                injected = fuxi_touch_inject(frame->arg[0], frame->arg[1],
+          +                                             frame->arg[2], frame->arg[3],
+          +                                             (int)(frame->arg[4] ? frame->arg[4] / 20u + 4u : 8u),
+          +                                             (int)frame->arg[4]);
+          +        }
+          +        reply_bytes = injected == 0 ?
+          +            control_reply_reboot(reply, sizeof(reply), frame, "OK", "injected") :
+          +            control_reply_reboot(reply, sizeof(reply), frame, "ERR",
+          +                                 injected == -1 ? "unavailable" : "rejected");
+          +        break;
+          +    }
+               case SXNU_CONTROL_VERB_REBOOT_FASTBOOT:
+                   if (__atomic_load_n(&control_reboot_requested, __ATOMIC_ACQUIRE) ||
+                       __atomic_load_n(&control_reboot_taken, __ATOMIC_ACQUIRE))
+          KPATCH
+          cat > "$RUNNER_TEMP/touch-package.patch" <<'PPATCH'
+          diff --git a/package/TouchProbe.cpp b/package/TouchProbe.cpp
+          index 9ee4e18..1f6e62a 100644
+          --- a/package/TouchProbe.cpp
+          +++ b/package/TouchProbe.cpp
+          @@ -491,6 +491,47 @@ bool configureClock(Session &s, unsigned hz) {
+           }  // namespace
+           
+           // Producer entry for a second board driver (Ftm5Touch.cpp): same seqlock and sink as the Novatek path.
+          +
+          +/* Forward declaration: this file defines native_touch_publish further down, and fuxi_touch_inject
+          + * below it calls that definition. */
+          +extern "C" void native_touch_publish(const int *ids, const int *xs, const int *ys, unsigned count);
+          +
+          +/* Synthetic touch for the USB control verbs (TAP/SWP in QcomXnuUsbDebug). Screen points on the
+          + * 360x800 panel are scaled to the HID digitizer's logical range, the same one the FTM5 path
+          + * publishes (Ftm5Touch.cpp: x 0..30479, y 0..20319). Each step publishes one contact set through
+          + * the shared seqlock, so the event driver sees a normal down, moves and up. Runs in the USB
+          + * worker, so the waits are bounded IODelay calls. */
+          +extern "C" int fuxi_touch_inject(int x0, int y0, int x1, int y1, int steps, int milliseconds)
+          +{
+          +    constexpr int kPanelWidth = 360, kPanelHeight = 800;
+          +    constexpr int kLogicalX = 30479, kLogicalY = 20319;
+          +    if (x0 < 0 || x0 >= kPanelWidth || y0 < 0 || y0 >= kPanelHeight ||
+          +        x1 < 0 || x1 >= kPanelWidth || y1 < 0 || y1 >= kPanelHeight) return -1;
+          +    if (steps < 1) steps = 1;
+          +    if (steps > 120) steps = 120;
+          +    if (milliseconds < 0) milliseconds = 0;
+          +    if (milliseconds > 4000) milliseconds = 4000;
+          +    const int id = 0;
+          +    const int holdMs = steps > 0 ? milliseconds / steps : 0;
+          +    int x = x0, y = y0;
+          +    for (int step = 0; step <= steps; ++step) {
+          +        if (step) {
+          +            x = x0 + (x1 - x0) * step / steps;
+          +            y = y0 + (y1 - y0) * step / steps;
+          +        }
+          +        const int hx = x * kLogicalX / (kPanelWidth - 1);
+          +        const int hy = y * kLogicalY / (kPanelHeight - 1);
+          +        const int xs[1] = {hx}, ys[1] = {hy};
+          +        native_touch_publish(&id, xs, ys, 1);
+          +        if (holdMs) IODelay((unsigned)holdMs * 1000u);
+          +    }
+          +    /* The panel stays untouched while a synthetic contact is up, so some systems keep the last
+          +     * position; publish an explicit release as well. */
+          +    native_touch_publish(&id, nullptr, nullptr, 0);
+          +    (void)milliseconds;
+          +    return 0;
+          +}
+          +
+           extern "C" void native_touch_publish(const int *ids, const int *xs, const int *ys, unsigned count) {
+               publishRaw(count, ids, xs, ys);
+           }
+          PPATCH
+          n=0
+          for f in $(find device device-ios17 -name Ios17LegacyDisplayProbe.cpp -type f); do
+            patch -N --no-backup-if-mismatch "$f" < "$RUNNER_TEMP/shot.patch"; n=$((n+1)); done
+          for d in $(find device device-ios17 -path "*QcomXnuUsbDebug/kernel/QcomXnuUsbDebug.c" -type f | sed "s#/kernel/QcomXnuUsbDebug.c##"); do
+            (cd "$d" && patch -p1 -N --no-backup-if-mismatch < "$RUNNER_TEMP/touch-kernel.patch"); n=$((n+1)); done
+          for d in $(find device device-ios17 -path "*package/TouchProbe.cpp" -type f | sed "s#/package/TouchProbe.cpp##"); do
+            (cd "$d" && patch -p1 -N --no-backup-if-mismatch < "$RUNNER_TEMP/touch-package.patch"); n=$((n+1)); done
+          echo "patched $n targets"; test $n -ge 3
+          grep -rn "qcom_usb_debug_register_framebuffer(&" device device-ios17 --include=*.cpp | head -3
+          grep -rn "fuxi_touch_inject" device device-ios17 --include=*.c --include=*.cpp | head -5
 
       - name: authenticated firmware blob downloads
         run: |
