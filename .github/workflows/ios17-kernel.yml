@@ -537,7 +537,7 @@ jobs:
            static inline int
            sxnu_control_parse(const char *line, size_t bytes, struct sxnu_control_frame *frame)
            {
-          @@ -216,6 +234,34 @@ sxnu_control_parse(const char *line, size_t bytes, struct sxnu_control_frame *fr
+          @@ -216,6 +234,36 @@ sxnu_control_parse(const char *line, size_t bytes, struct sxnu_control_frame *fr
                verb = sxnu_control_parse_verb(p + verb_start, verb_bytes);
                if (verb == SXNU_CONTROL_VERB_INVALID) return 0;
                cursor++;
@@ -565,10 +565,12 @@ jobs:
           +            }
           +        }
           +        frame->nargs = (uint8_t)got;
+          +        /* The space after the verb was consumed above; only arguments need one more before the CRC. */
+          +        if (want) {
+          +            if (cursor >= bytes || p[cursor] != (uint8_t)' ') return 0;
+          +            cursor++;
+          +        }
           +    }
-          +
-          +    if (cursor >= bytes || p[cursor] != (uint8_t)' ') return 0;
-          +    cursor++;
                crc_start = cursor;
                if (crc_start > bytes || bytes - crc_start != SXNU_CONTROL_CRC_HEX) return 0;
                if (!sxnu_control_parse_hex(p + crc_start, SXNU_CONTROL_CRC_HEX, &crc)) return 0;
@@ -793,9 +795,42 @@ jobs:
           open(p, 'w').write(s)
           print('reply room patch applied', p)
           REPLYPY
+          cat > "$RUNNER_TEMP/qud-control-fix.py" <<'CTLPY'
+          #!/usr/bin/env python3
+          """QcomUsbControl.h after usb-touch-inject.patch: TAP/SWP sit after REBOOT-FASTBOOT in the verb enum, but accept/commit
+          only allow verbs up to REBOOT-FASTBOOT, so every TAP/SWP was refused. Also keep the parser free of side effects on a
+          rejected frame (the module's exact-length test): collect the arguments locally, store them with the other fields.
+          Usage: qud-control-fix.py <QcomUsbControl.h>"""
+          import sys
+          p = sys.argv[1]
+          s = open(p).read()
+          def sub(old, new, count=1):
+              global s
+              assert s.count(old) == count, (old, s.count(old))
+              s = s.replace(old, new)
+          sub('        frame->verb > SXNU_CONTROL_VERB_REBOOT_FASTBOOT) return SXNU_CONTROL_VERB_INVALID;\n',
+              '        frame->verb > SXNU_CONTROL_VERB_SWIPE) return SXNU_CONTROL_VERB_INVALID;\n')
+          sub('        accepted > SXNU_CONTROL_VERB_REBOOT_FASTBOOT || frame->verb != accepted) return 0;\n',
+              '        accepted > SXNU_CONTROL_VERB_SWIPE || frame->verb != accepted) return 0;\n')
+          sub('    /* Optional decimal arguments between the verb and the CRC.',
+              '    uint32_t parsed_args[SXNU_CONTROL_ARGS] = {0, 0, 0, 0, 0};\n'
+              '    uint8_t parsed_nargs = 0;\n'
+              '    /* Optional decimal arguments between the verb and the CRC.')
+          sub('            frame->arg[got++] = (uint32_t)value;\n', '            parsed_args[got++] = (uint32_t)value;\n')
+          sub('        frame->nargs = (uint8_t)got;\n', '        parsed_nargs = (uint8_t)got;\n')
+          sub('    frame->verb = verb;\n',
+              '    frame->verb = verb;\n'
+              '    for (unsigned i = 0; i < SXNU_CONTROL_ARGS; ++i) frame->arg[i] = parsed_args[i];\n'
+              '    frame->nargs = parsed_nargs;\n')
+          open(p, 'w').write(s)
+          print('control fix applied', p)
+          CTLPY
           for d in $(find device device-ios17 -path "*QcomXnuUsbDebug/kernel/QcomXnuUsbDebug.c" -type f | sed "s#/kernel/QcomXnuUsbDebug.c##"); do
             python3 "$RUNNER_TEMP/qud-shot-direct.py" "$d/kernel/QcomUsbScreenshot.c"
-            python3 "$RUNNER_TEMP/qud-reply-room.py" "$d/kernel/QcomXnuUsbDebug.c"; n=$((n+1)); done
+            python3 "$RUNNER_TEMP/qud-reply-room.py" "$d/kernel/QcomXnuUsbDebug.c"
+            # Run 17/18 answered nothing: the TAP/SWP parser wanted a second space before the CRC of every frame without
+            # arguments, and accept/commit refused TAP/SWP. qud-control-fix.py fixes the range and the side effects.
+            python3 "$RUNNER_TEMP/qud-control-fix.py" "$d/kernel/QcomUsbControl.h"; n=$((n+1)); done
           echo "patched $n targets"; test $n -ge 4
           grep -rn "qcom_usb_debug_register_framebuffer(&" device device-ios17 --include=*.cpp | head -3
           grep -rn "fuxi_touch_inject" device device-ios17 --include=*.c --include=*.cpp | head -5
