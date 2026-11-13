@@ -123,8 +123,32 @@ jobs:
           git add -A; git commit -q -m "Kerfand iOS 17 diff" || true
           git fetch -q https://github.com/UniXNU/AdrenoMetal.git "${{ inputs.metal_ref }}"
           git checkout -q -f FETCH_HEAD; git log --oneline -1
-          git apply --check "$GITHUB_WORKSPACE/.github/metal/kerfand-metal-on-main.patch"
-          git apply "$GITHUB_WORKSPACE/.github/metal/kerfand-metal-on-main.patch"
+          cat > "$RUNNER_TEMP/kerfand-metal-on-main.patch" <<'PATCH'
+          diff --git a/NativeAdrenoMetalPlugin.mm b/NativeAdrenoMetalPlugin.mm
+          index ffa797d..77f482d 100644
+          --- a/NativeAdrenoMetalPlugin.mm
+          +++ b/NativeAdrenoMetalPlugin.mm
+          @@ -470,6 +470,9 @@ static id deviceForPort(unsigned port) {
+                   setenv("CA_ALLOW_EDR_MIRRORING", "0", 1);
+           #if !TARGET_OS_OSX
+                   // The stored option values and the framebuffer branch are addresses of iPadOS 27's QuartzCore (24A446).
+          +        // The iOS 17 arm64e build (21H16, NATIVE_ADRENO_IOS17_ARM64E) has another cache: writing those addresses
+          +        // corrupted the render server, so it keeps the environment settings above only.
+          +#if !defined(NATIVE_ADRENO_IOS17_ARM64E)
+                   if (void *start = dlsym(RTLD_DEFAULT, "CARenderServerStart")) {
+                       const uintptr_t slide = (uintptr_t)ptrauth_strip(start, ptrauth_key_function_pointer) - 0x1846dce88;
+                       const float one = 1.0f, never = 1e30f;
+          @@ -510,6 +513,7 @@ static id deviceForPort(unsigned port) {
+                       }, gpu) == 0)
+                           pthread_detach(reader);
+                   }
+          +#endif  // !NATIVE_ADRENO_IOS17_ARM64E
+           #else
+                   // macOS: the framebuffer format is changed as a fixup of signed text (the board's payload text_fixups), applied when the page
+                   // passes code signing validation. A write into the mapped page from here made the page invalid, and code signing killed
+          PATCH
+          git apply --check "$RUNNER_TEMP/kerfand-metal-on-main.patch"
+          git apply "$RUNNER_TEMP/kerfand-metal-on-main.patch"
           grep -n 'NATIVE_ADRENO_IOS17_ARM64E' NativeAdrenoMetalPlugin.mm | head -6
 
       - name: fixture additions (pairings the boot (2) kernel had)
