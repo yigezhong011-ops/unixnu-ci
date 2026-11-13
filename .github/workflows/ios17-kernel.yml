@@ -868,6 +868,25 @@ jobs:
           grep -rn "qcom_usb_debug_register_framebuffer(&" device device-ios17 --include=*.cpp | head -3
           grep -rn "fuxi_touch_inject" device device-ios17 --include=*.c --include=*.cpp | head -5
 
+      - name: QUD import allowlist (touch inject)
+        run: |
+          # QcomXnuUsbDebug's build.py refuses XNU imports outside a fixed set; TAP/SWP call fuxi_touch_inject.
+          n=0
+          for f in $(find device device-ios17 -path '*QcomXnuUsbDebug/scripts/build.py' -type f); do
+            python3 - "$f" <<'PY'
+          import sys
+          p = sys.argv[1]; s = open(p).read()
+          old = "'_sysctl_register_oid_early', '_sysctl__debug_children'}"
+          new = "'_sysctl_register_oid_early', '_sysctl__debug_children', '_fuxi_touch_inject', 'l_fuxi_touch_inject.ptrauth'}"
+          if new not in s:
+              assert s.count(old) == 1, p
+              open(p, 'w').write(s.replace(old, new))
+          print('allowlist ok', p)
+          PY
+            n=$((n+1))
+          done
+          test $n -ge 1
+
       - name: authenticated firmware blob downloads
         run: |
           # fuxi_adreno_common.py fetches the pinned fuxi firmware blobs from api.github.com anonymously; shared runner
@@ -1046,14 +1065,14 @@ jobs:
           find out-ios17 -name kernel.macho -print
 
       - name: Build Turnip for ios17e
-        if: inputs.build_addon
+        if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         run: |
           cd out-ios17/fuxi/tree
           python3 scripts/build-turnip-darwin.py --target ios17e
 
       - name: Build the Metal plugin for ios17e
-        if: inputs.build_addon
+        if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         run: |
           cd out-ios17/fuxi/tree
@@ -1063,7 +1082,7 @@ jobs:
       # 脚本里有四组作者硬编码路径，必须先 sed。BASE 指到**含 UniXNU/ 的那一层**（$GITHUB_WORKSPACE），
       # 因为脚本里 TREE = BASE/'UniXNU/out-ios17/fuxi/tree'。
       - name: Patch the status bar script's hardcoded paths
-        if: inputs.build_addon
+        if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
@@ -1084,7 +1103,7 @@ jobs:
           grep -nE "^BASE|^TREE|^SRC|^OUT|^BUNDLE|^SDK" out-ios17/fuxi/tree/scripts/build-fuxi-statusbar.py
 
       - name: Build and inject FuxiStatusBar.dylib
-        if: inputs.build_addon
+        if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         run: |
           cd out-ios17/fuxi/tree
@@ -1094,7 +1113,7 @@ jobs:
       # 期望的 sha256 从环境变量 ORIGINAL_STATIC_SYSTEM_SHA256 读（CI 里传 9719ae3a…），
       # 而不是改脚本里的常量：脚本里原来的 7416ca4f… 是 iPadOS 27 / 24A446 那一对的哈希。
       - name: Make the original trust bundle hash configurable
-        if: inputs.build_addon
+        if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         run: |
           python3 - <<'PY'
@@ -1119,7 +1138,7 @@ jobs:
           grep -n 'ORIGINAL_STATIC_SYSTEM_SHA256\|expected = os.environ' out-ios17/fuxi/tree/scripts/make-owner-trust-bundle.py
 
       - name: Place the original static/system trust bundle
-        if: inputs.build_addon
+        if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         env:
           # 21H16 (iOS 17.7) 那一对：static 2848 条 + system 80 条，由
@@ -1151,7 +1170,7 @@ jobs:
           echo "trust bundle restored and verified"
 
       - name: Build the owner trust bundle
-        if: inputs.build_addon
+        if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         run: |
           cd out-ios17/fuxi/tree
@@ -1159,7 +1178,7 @@ jobs:
 
       # --wallpaper 先不带（壁纸 overlay 之后再补）：make-gpu-addon.py 的 --wallpaper 是可选参数。
       - name: Pack the GPU addon
-        if: inputs.build_addon
+        if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         run: |
           cd out-ios17/fuxi/tree
@@ -1186,7 +1205,7 @@ jobs:
           PY
 
       - name: Collect the iOS GPU addon
-        if: inputs.build_addon
+        if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         run: |
           mkdir -p "$RUNNER_TEMP/addon-out"
