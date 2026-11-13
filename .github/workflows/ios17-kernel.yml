@@ -16,7 +16,14 @@ on:
         required: true
         default: dec111b629bb66d3ec195c653853d8916db42b2a
       metal_upstream:
-        description: Merge UniXNU/AdrenoMetal main into the AdrenoMetal submodule after Kerfand's diff
+        description: AdrenoMetal at metal_ref (UniXNU/AdrenoMetal) plus .github/metal/kerfand-metal-on-main.patch
+        type: boolean
+        default: false
+      metal_ref:
+        description: UniXNU/AdrenoMetal commit for metal_upstream
+        default: 73d582fd4d5772b1f5fa83581a25077a16f2b6cd
+      build_addon:
+        description: Also build kernel.macho.gpuaddon (Turnip, Metal plugin, status bar, owner trust) for ios17e
         type: boolean
         default: false
       runner:
@@ -114,9 +121,11 @@ jobs:
         run: |
           export GIT_COMMITTER_NAME=ci GIT_COMMITTER_EMAIL=ci@localhost GIT_AUTHOR_NAME=ci GIT_AUTHOR_EMAIL=ci@localhost
           git add -A; git commit -q -m "Kerfand iOS 17 diff" || true
-          git fetch -q https://github.com/UniXNU/AdrenoMetal.git main
-          git log --oneline -1 FETCH_HEAD
-          git merge --no-edit FETCH_HEAD || { git diff --name-only --diff-filter=U; exit 1; }
+          git fetch -q https://github.com/UniXNU/AdrenoMetal.git "${{ inputs.metal_ref }}"
+          git checkout -q -f FETCH_HEAD; git log --oneline -1
+          git apply --check "$GITHUB_WORKSPACE/.github/metal/kerfand-metal-on-main.patch"
+          git apply "$GITHUB_WORKSPACE/.github/metal/kerfand-metal-on-main.patch"
+          grep -n 'NATIVE_ADRENO_IOS17_ARM64E' NativeAdrenoMetalPlugin.mm | head -6
 
       - name: fixture additions (pairings the boot (2) kernel had)
         working-directory: UniXNU
@@ -1012,6 +1021,158 @@ jobs:
           fi
           find out-ios17 -name kernel.macho -print
 
+      - name: Build Turnip for ios17e
+        if: inputs.build_addon
+        working-directory: UniXNU
+        run: |
+          cd out-ios17/fuxi/tree
+          python3 scripts/build-turnip-darwin.py --target ios17e
+
+      - name: Build the Metal plugin for ios17e
+        if: inputs.build_addon
+        working-directory: UniXNU
+        run: |
+          cd out-ios17/fuxi/tree
+          python3 scripts/build-adreno-metal-plugin.py --target ios17e --no-replay
+
+      # 第 8 项：编 dylib + 给插件加 @loader_path/FuxiStatusBar.dylib + 重签 + 塞进 addon。
+      # 脚本里有四组作者硬编码路径，必须先 sed。BASE 指到**含 UniXNU/ 的那一层**（$GITHUB_WORKSPACE），
+      # 因为脚本里 TREE = BASE/'UniXNU/out-ios17/fuxi/tree'。
+      - name: Patch the status bar script's hardcoded paths
+        if: inputs.build_addon
+        working-directory: UniXNU
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          python3 - "$GITHUB_WORKSPACE" "$SDK" <<'PY'
+          import sys
+          from pathlib import Path
+          base, sdk = sys.argv[1], sys.argv[2]
+          p = Path('out-ios17/fuxi/tree/scripts/build-fuxi-statusbar.py')
+          s = p.read_text()
+          s = s.replace("'/home/xiaomi/sadnut-fuxi-local-20261103'", repr(base))
+          s = s.replace("'/home/xiaomi/sdk/iPhoneOS17-21H16.sdk'", repr(sdk))
+          s = s.replace(
+              "env['PATH'] = ':'.join(['/home/xiaomi/.local/bin', str(BASE / 'bin'), '/home/xiaomi/unixnu-linux/CommandLineTools/usr/bin', env['PATH']])",
+              "env['PATH'] = env['PATH']")
+          p.write_text(s)
+          print('patched BASE ->', base, 'SDK ->', sdk)
+          PY
+          grep -nE "^BASE|^TREE|^SRC|^OUT|^BUNDLE|^SDK" out-ios17/fuxi/tree/scripts/build-fuxi-statusbar.py
+
+      - name: Build and inject FuxiStatusBar.dylib
+        if: inputs.build_addon
+        working-directory: UniXNU
+        run: |
+          cd out-ios17/fuxi/tree
+          python3 scripts/build-fuxi-statusbar.py
+
+      # owner trust bundle 需要 build/original-static-system-trust/original-static-system.bundle。
+      # 期望的 sha256 从环境变量 ORIGINAL_STATIC_SYSTEM_SHA256 读（CI 里传 9719ae3a…），
+      # 而不是改脚本里的常量：脚本里原来的 7416ca4f… 是 iPadOS 27 / 24A446 那一对的哈希。
+      - name: Make the original trust bundle hash configurable
+        if: inputs.build_addon
+        working-directory: UniXNU
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('out-ios17/fuxi/tree/scripts/make-owner-trust-bundle.py')
+          s = p.read_text()
+          old = ("original = (ROOT / 'build/original-static-system-trust/original-static-system.bundle').read_bytes()\n"
+                 "if hashlib.sha256(original).hexdigest() != '7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7':\n"
+                 "    raise SystemExit('The original static/System trust bundle differs from the unchanged target input')")
+          new = ("import os\n"
+                 "original = (ROOT / 'build/original-static-system-trust/original-static-system.bundle').read_bytes()\n"
+                 "expected = os.environ.get('ORIGINAL_STATIC_SYSTEM_SHA256',\n"
+                 "                          '7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7')\n"
+                 "if hashlib.sha256(original).hexdigest() != expected:\n"
+                 "    raise SystemExit('The original static/System trust bundle differs from the unchanged target input: '\n"
+                 "                     + hashlib.sha256(original).hexdigest() + ' != ' + expected)")
+          if old not in s:
+              raise SystemExit('make-owner-trust-bundle.py: the hash check is not where this step expects it')
+          p.write_text(s.replace(old, new, 1))
+          print('hash check now reads ORIGINAL_STATIC_SYSTEM_SHA256')
+          PY
+          grep -n 'ORIGINAL_STATIC_SYSTEM_SHA256\|expected = os.environ' out-ios17/fuxi/tree/scripts/make-owner-trust-bundle.py
+
+      - name: Place the original static/system trust bundle
+        if: inputs.build_addon
+        working-directory: UniXNU
+        env:
+          # 21H16 (iOS 17.7) 那一对：static 2848 条 + system 80 条，由
+          # dump\wsl\extract-original-trust-bundle.py 从 boot2-ios 的载荷卷提出来。
+          #
+          # GitHub 单个 secret 上限 48 KB，所以原文件按字节切成 35000 / 35000 / 332 三段，
+          # 每段各自 base64（解码后按顺序拼接就是原文件）。
+          S1: ${{ secrets.ORIGINAL_STATIC_SYSTEM_BUNDLE_B64_1 }}
+          S2: ${{ secrets.ORIGINAL_STATIC_SYSTEM_BUNDLE_B64_2 }}
+          S3: ${{ secrets.ORIGINAL_STATIC_SYSTEM_BUNDLE_B64_3 }}
+          ORIGINAL_STATIC_SYSTEM_SHA256: '9719ae3a3e3dedb47c66e4c58175ec503d1e1c3b56b8d5ac0cd4a0ba550cb1cb'
+        run: |
+          OUT=out-ios17/fuxi/tree/build/original-static-system-trust/original-static-system.bundle
+          mkdir -p "$(dirname "$OUT")"
+          : > "$OUT"
+          # base64 -d on Linux/newer macOS, base64 -D on older macOS.
+          for S in "$S1" "$S2" "$S3"; do
+            printf '%s' "$S" | base64 -d >> "$OUT" 2>/dev/null || printf '%s' "$S" | base64 -D >> "$OUT"
+          done
+          BYTES=$(wc -c < "$OUT" | tr -d ' ')
+          ACTUAL=$(shasum -a 256 "$OUT" | cut -d' ' -f1)
+          echo "rebuilt $OUT: $BYTES bytes, sha256 $ACTUAL"
+          if [ "$BYTES" != "70332" ]; then
+            echo "size mismatch: $BYTES != 70332"; exit 1
+          fi
+          if [ "$ACTUAL" != "$ORIGINAL_STATIC_SYSTEM_SHA256" ]; then
+            echo "sha256 mismatch: $ACTUAL != $ORIGINAL_STATIC_SYSTEM_SHA256"; exit 1
+          fi
+          echo "trust bundle restored and verified"
+
+      - name: Build the owner trust bundle
+        if: inputs.build_addon
+        working-directory: UniXNU
+        run: |
+          cd out-ios17/fuxi/tree
+          python3 scripts/make-owner-trust-bundle.py
+
+      # --wallpaper 先不带（壁纸 overlay 之后再补）：make-gpu-addon.py 的 --wallpaper 是可选参数。
+      - name: Pack the GPU addon
+        if: inputs.build_addon
+        working-directory: UniXNU
+        run: |
+          cd out-ios17/fuxi/tree
+          mkdir -p build/ios17-addon
+          python3 scripts/make-gpu-addon.py --publish build/ios17-addon/kernel.macho.gpuaddon
+          ls -l build/ios17-addon/kernel.macho.gpuaddon
+          # 第 8 项自检：dylib 必须真的在 addon 里
+          python3 - <<'PY'
+          import struct, sys
+          from pathlib import Path
+          b = Path('build/ios17-addon/kernel.macho.gpuaddon').read_bytes()
+          assert b[:8] == b'NGPUADD2', 'not an addon'
+          count = struct.unpack_from('<I', b, 8)[0]
+          at, names = 24, []
+          for _ in range(count):
+              nl, mode, size, packed = struct.unpack_from('<IIQQ', b, at); at += 24
+              names.append(b[at:at+nl-1].decode())
+              at += (nl + 7)//8*8 + (packed + 7)//8*8
+          print('addon entries:', len(names))
+          for n in names: print('  ', n)
+          if not any('FuxiStatusBar' in n for n in names):
+              sys.exit('FuxiStatusBar.dylib missing from the addon — statusbar step did not run')
+          print('OK: FuxiStatusBar.dylib present')
+          PY
+
+      - name: Collect the iOS GPU addon
+        if: inputs.build_addon
+        working-directory: UniXNU
+        run: |
+          mkdir -p "$RUNNER_TEMP/addon-out"
+          cp out-ios17/fuxi/tree/build/ios17-addon/kernel.macho.gpuaddon "$RUNNER_TEMP/addon-out/"
+          cp -R out-ios17/fuxi/tree/build/adreno-metal-plugin17e/NativeAdrenoMetal.bundle \
+            "$RUNNER_TEMP/addon-out/" 2>/dev/null || true
+          cp out-ios17/fuxi/tree/build/adreno-metal-plugin/owner-trust.bundle \
+            "$RUNNER_TEMP/addon-out/" 2>/dev/null || true
+          ls -l "$RUNNER_TEMP/addon-out"
+
       - name: encrypt and upload
         if: always()
         run: |
@@ -1021,6 +1182,10 @@ jobs:
           if [ -n "$K" ]; then
             tar -C "$(dirname "$K")" -czf "$RUNNER_TEMP/k.tgz" .
             age -r "$AGE_RECIPIENT" -o "$RUNNER_TEMP/up/ios17-kernel.tgz.age" "$RUNNER_TEMP/k.tgz"; rm -f "$RUNNER_TEMP/k.tgz"
+          fi
+          if [ -d "$RUNNER_TEMP/addon-out" ]; then
+            tar -C "$RUNNER_TEMP/addon-out" -czf "$RUNNER_TEMP/a.tgz" .
+            age -r "$AGE_RECIPIENT" -o "$RUNNER_TEMP/up/ios17-gpuaddon.tgz.age" "$RUNNER_TEMP/a.tgz"; rm -rf "$RUNNER_TEMP/a.tgz" "$RUNNER_TEMP/addon-out"
           fi
           # Build logs only (no binaries): find *.log under out-ios17, encrypted too since they may quote kernel symbols.
           find UniXNU/out-ios17 -name '*.log' -size -20M 2>/dev/null | tar -czf "$RUNNER_TEMP/logs.tgz" -T - 2>/dev/null || true
