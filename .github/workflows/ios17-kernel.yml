@@ -876,10 +876,10 @@ jobs:
             python3 - "$f" <<'PY'
           import sys
           p = sys.argv[1]; s = open(p).read()
-          old = "'_sysctl_register_oid_early', '_sysctl__debug_children'}"
-          new = "'_sysctl_register_oid_early', '_sysctl__debug_children', '_fuxi_touch_inject', 'l_fuxi_touch_inject.ptrauth'}"
+          old = "allowed = {"
+          new = "allowed = {'_fuxi_touch_inject', 'l_fuxi_touch_inject.ptrauth', "
           if new not in s:
-              assert s.count(old) == 1, p
+              assert s.count(old) == 1, (p, s.count(old))
               open(p, 'w').write(s.replace(old, new))
           print('allowlist ok', p)
           PY
