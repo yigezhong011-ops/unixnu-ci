@@ -22,6 +22,10 @@ on:
       metal_ref:
         description: UniXNU/AdrenoMetal commit for metal_upstream
         default: 73d582fd4d5772b1f5fa83581a25077a16f2b6cd
+      build_kernel:
+        description: Build the kernel (false = assemble the tree only, for addon-only runs)
+        type: boolean
+        default: true
       build_addon:
         description: Also build kernel.macho.gpuaddon (Turnip, Metal plugin, status bar, owner trust) for ios17e
         type: boolean
@@ -1000,7 +1004,21 @@ jobs:
           if [ -z "$DEC" ] && [ "$(head -c 4 "$RAW" | xxd -p)" = "cffaedfe" ]; then DEC=$RAW; fi
           test -n "$DEC"; cp "$DEC" "$D/kernelcache.decompressed"; ls -la "$D"
 
+      - name: tree only (no kernel)
+        if: ${{ !inputs.build_kernel }}
+        working-directory: UniXNU
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UNIXNU_XNU_ARCH: arm64e
+        run: |
+          export UNIXNU_OUT="$PWD/out-ios17" UNIXNU_KERNELCACHE="$PWD/out-ios17/ipsw/21H16/kernelcache.decompressed"
+          [ -f ../device/scripts/extract-files.py ] && python3 ../device/scripts/extract-files.py --device ../device || echo "extract-files skipped/failed"
+          ./unixnu defconfig fuxi_ios17_kernel_defconfig -D ../device-ios17
+          ./unixnu tree -D ../device-ios17
+          ls out-ios17/fuxi/tree/scripts | grep -E 'turnip|metal-plugin|statusbar|gpu-addon|owner-trust'
+
       - name: kernel
+        if: ${{ inputs.build_kernel }}
         working-directory: UniXNU
         env:
           GITHUB_TOKEN: ${{ github.token }}
