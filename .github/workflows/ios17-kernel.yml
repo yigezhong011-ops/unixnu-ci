@@ -1064,6 +1064,38 @@ jobs:
           fi
           find out-ios17 -name kernel.macho -print
 
+      - name: Prepare Mesa, the translator and the Mesa venv
+        if: ${{ !cancelled() && inputs.build_addon }}
+        working-directory: UniXNU
+        run: |
+          cd out-ios17/fuxi/tree
+          command -v glslangValidator >/dev/null || brew install glslang
+          python3 - <<'PY'
+          import json, subprocess, sys
+          from pathlib import Path
+          ROOT = Path('.').resolve()
+          def run(*c): subprocess.run([str(x) for x in c], check=True)
+          def checkout(path, pin):
+              if path.exists():
+                  return False
+              path.mkdir(parents=True); run('git', 'init', '-q', path)
+              run('git', '-C', path, 'fetch', '-q', '--depth=1', pin.get('mirror', pin['repository']), pin['commit'])
+              run('git', '-C', path, 'checkout', '-q', '--detach', 'FETCH_HEAD')
+              return True
+          pins = json.loads((ROOT / 'scripts/data/adreno-compiler-inputs.json').read_text())
+          mesa = ROOT / '.cache/mesa-work'
+          if checkout(mesa, pins['mesa']):
+              for patch in pins['patches']:
+                  run('git', '-C', mesa, 'apply', ROOT / patch)
+          tr = json.loads((ROOT / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())['translator']
+          checkout(ROOT / '.cache/gpu-reference/metal2vulkan', tr)
+          venv = ROOT / '.cache/mesa-venv'
+          if not (venv / 'bin/python').is_file():
+              run(sys.executable, '-m', 'venv', venv)
+          run(venv / 'bin/python', '-m', 'pip', 'install', '-q', '-r', ROOT / 'scripts/requirements-adreno-compiler.txt')
+          print('mesa', pins['mesa']['commit'], 'patches', len(pins['patches']), 'translator', tr['commit'])
+          PY
+
       - name: Build Turnip for ios17e
         if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
