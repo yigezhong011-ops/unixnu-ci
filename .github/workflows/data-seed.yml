@@ -86,34 +86,31 @@ jobs:
           grep -iE 'dmg|os|filesystem' info.txt | head -30 || true
           ipsw extract --remote --help 2>&1 | head -30 || true
 
-      - name: fetch the OS dmg
+      - name: fetch the OS filesystem dmg
         run: |
           cd "$RUNNER_TEMP/ipsw"
-          # Preferred: let ipsw pull only the filesystem dmg from the remote image.
-          set +e
-          ipsw extract --remote --dmg --filesystem "$IPSW_URL" -o . 2>&1 | tee dmg.log
-          set -e
-          ls -l *.dmg 2>/dev/null || true
-          if ! ls *.dmg >/dev/null 2>&1; then
-            echo "falling back to a full remote extract"
-            ipsw extract --remote "$IPSW_URL" -o . 2>&1 | tail -20
-          fi
-          ls -l | head -30
-          # AEA-encrypted or otherwise wrapped dmgs are expanded by ipsw itself; a raw ULFO/LZFSE dmg
-          # still mounts with hdiutil, so try the plain file names first.
+          # ipsw prints the volume dmg names; FileSystem is the one make-data-seed.py wants.
+          ipsw info --remote "$IPSW_URL" > info.txt 2>&1 || true
+          cat info.txt | grep -E 'FileSystem|SystemOS|AppOS|RestoreRamDisk' || true
+          NAME=$(awk '$1=="FileSystem"{print $3}' info.txt | head -1)
+          echo "FileSystem dmg: $NAME"
+          [ -n "$NAME" ] || { echo "no FileSystem entry in ipsw info"; cat info.txt | head -40; exit 1; }
+          ipsw extract --remote --files "^$NAME$" "$IPSW_URL" -o . 2>&1 | tail -8
           ls -l *.dmg 2>/dev/null | head -10
+          [ -f "$NAME" ] || { echo "extract did not produce $NAME"; ls -l; exit 1; }
+          echo "OS_DMG=$NAME" >> "$GITHUB_ENV"
 
       - name: mount the OS volume read-only
         run: |
           cd "$RUNNER_TEMP/ipsw"
           mkdir -p "$RUNNER_TEMP/os"
-          DMG=$(ls *.dmg 2>/dev/null | grep -iv cryptex | head -1)
-          echo "OS dmg: $DMG"
-          [ -n "$DMG" ] || { echo "no dmg found"; ls -l; exit 1; }
-          hdiutil attach -readonly -nobrowse -owners off -mountpoint "$RUNNER_TEMP/os" "$DMG" 2>&1 | tail -5 || {
-            echo "direct attach failed; trying ipsw img"; ipsw img info "$DMG" 2>&1 | head -10; exit 1; }
+          echo "OS dmg: $OS_DMG"
+          ls -l "$OS_DMG"
+          hdiutil attach -readonly -nobrowse -owners off -mountpoint "$RUNNER_TEMP/os" "$OS_DMG" 2>&1 | tail -5 || {
+            echo "direct attach failed; ipsw img info:"; ipsw img info "$OS_DMG" 2>&1 | head -12
+            echo "trying ipsw img mount"; ipsw img mount --help 2>&1 | head -8; exit 1; }
           ls "$RUNNER_TEMP/os" | head
-          test -x "$RUNNER_TEMP/os/sbin/launchd" || { echo "not an OS volume"; exit 1; }
+          test -x "$RUNNER_TEMP/os/sbin/launchd" || { echo "not an OS volume (no sbin/launchd)"; ls "$RUNNER_TEMP/os"; exit 1; }
 
       - name: build the Data seed
         working-directory: UniXNU
