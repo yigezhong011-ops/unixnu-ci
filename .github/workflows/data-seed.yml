@@ -95,10 +95,17 @@ jobs:
           NAME=$(awk '$1=="FileSystem"{print $3}' info.txt | head -1)
           echo "FileSystem dmg: $NAME"
           [ -n "$NAME" ] || { echo "no FileSystem entry in ipsw info"; cat info.txt | head -40; exit 1; }
-          ipsw extract --remote --files "^$NAME$" "$IPSW_URL" -o . 2>&1 | tail -8
-          ls -l *.dmg 2>/dev/null | head -10
-          [ -f "$NAME" ] || { echo "extract did not produce $NAME"; ls -l; exit 1; }
-          echo "OS_DMG=$NAME" >> "$GITHUB_ENV"
+          # --pattern is the documented selector (ipsw extract --help: --pattern '.*\.ttf$')
+          ipsw extract --remote --pattern "$NAME" "$IPSW_URL" -o . 2>&1 | tail -10
+          ls -l *.dmg 2>/dev/null | head -10 || true
+          FOUND=$(find . -maxdepth 3 -name "$NAME" -type f | head -1)
+          if [ -z "$FOUND" ]; then
+            echo "extract did not produce $NAME; dmgs present:"
+            find . -maxdepth 3 -name '*.dmg' | head -10
+            exit 1
+          fi
+          echo "extracted: $FOUND ($(stat -f %z "$FOUND") bytes)"
+          echo "OS_DMG=$PWD/$FOUND" >> "$GITHUB_ENV"
 
       - name: mount the OS volume read-only
         run: |
