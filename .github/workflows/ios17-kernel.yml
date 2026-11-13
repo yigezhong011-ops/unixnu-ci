@@ -1183,7 +1183,7 @@ jobs:
         run: |
           cd out-ios17/fuxi/tree
           mkdir -p build/ios17-addon
-          python3 scripts/make-gpu-addon.py --publish build/ios17-addon/base.gpuaddon
+          ADRENO_PLUGIN_DIR=$PWD/build/adreno-metal-plugin17e python3 scripts/make-gpu-addon.py --publish build/ios17-addon/base.gpuaddon
 
       - name: FuxiStatusBar into the addon (trust.json gets the CDHashes)
         if: ${{ !cancelled() && inputs.build_addon }}
