@@ -123,6 +123,8 @@ jobs:
         working-directory: UniXNU
         run: |
           set -x
+          # seed-data-grow.py works in ROOT/build/, which a fresh checkout does not have
+          mkdir -p build
           ARGS=""
           [ "${{ inputs.skip_setup }}" = "true" ] && ARGS="--skip-setup"
           python3 scripts/make-data-seed.py "$RUNNER_TEMP/os" "$RUNNER_TEMP/seed.dbr" \
