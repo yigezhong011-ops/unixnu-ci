@@ -1,0 +1,152 @@
+name: fuxi iOS 17 3 GiB Data seed
+
+# Builds a 3 GiB Data seed (scratch-data.img, the DBRDISK1 container the payload carries as the Data
+# volume) from the iPhone15,2 21H16 IPSW. It contains no user data and no Apple binaries: the seed is
+# the OS volume's private/var directory skeleton plus our own five preference plists. Uploaded as a
+# plain artifact, not age-encrypted.
+#
+# Inputs and tooling deliberately match .github/workflows/ios17-kernel.yml:
+#   * SadNutWall/UniXNU at dec111b (the commit the kernel job applies Kerfand's changes to)
+#   * IPSW_URL from that workflow's env
+#   * blacktop/ipsw for the IPSW (same tool the kernelcache step uses)
+#   * macos-26 runner and Xcode_26.6
+
+on:
+  workflow_dispatch:
+    inputs:
+      gib:
+        description: 'Data container size in GiB'
+        required: true
+        default: '3'
+      skip_setup:
+        description: 'Also mark Setup as done inside the seed'
+        type: boolean
+        default: false
+      runner:
+        description: 'macOS runner label'
+        required: true
+        default: macos-26
+
+permissions:
+  contents: read
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  IPSW_URL: https://updates.cdn-apple.com/2024FallFCS/fullrestores/062-79094/90CE304F-6C16-402E-96C9-89260D93CA82/iPhone15,2_17.7_21H16_Restore.ipsw
+
+jobs:
+  seed:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 180
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      GIB: ${{ inputs.gib }}
+    steps:
+      - name: select Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            X=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+            echo "DEVELOPER_DIR=$X/Contents/Developer" >> "$GITHUB_ENV"; echo "using $X"
+          fi
+
+      - name: Checkout UniXNU at the base commit
+        uses: actions/checkout@v4
+        with:
+          repository: SadNutWall/UniXNU
+          ref: dec111b629bb66d3ec195c653853d8916db42b2a
+          path: UniXNU
+          submodules: recursive
+
+      - name: UniXNU submodules complete
+        run: |
+          git -C UniXNU log -1 --format='%h %s'
+          git -C UniXNU submodule foreach --quiet 'git rev-parse --is-shallow-repository | grep -q true && git fetch -q --unshallow || true' || true
+          ls UniXNU/scripts/make-data-seed.py UniXNU/scripts/seed-data-grow.py
+          # packed_ramdisk lives in the DarwinBoot driver tree
+          find UniXNU -name 'packed_ramdisk.py' | head -3
+
+      - name: ipsw (same install path as the kernel job)
+        run: |
+          brew install blacktop/tap/ipsw || true
+          if ! command -v ipsw >/dev/null; then
+            A=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/blacktop/ipsw/releases/latest |
+                python3 -c 'import json,sys,platform; a=[x["browser_download_url"] for x in json.load(sys.stdin)["assets"]]; m="x86_64" if platform.machine()=="x86_64" else "arm64"; c=[u for u in a if u.rsplit("/",1)[-1].startswith("ipsw_") and "macOS" in u and u.endswith(".tar.gz") and "frida" not in u and ("universal" in u or m in u)]; print(c[0])')
+            echo "ipsw from $A"; mkdir -p "$RUNNER_TEMP/ipswbin"; curl -fsSL "$A" | tar xz -C "$RUNNER_TEMP/ipswbin"
+            sudo install -m 0755 "$(find "$RUNNER_TEMP/ipswbin" -name ipsw -type f | head -1)" /usr/local/bin/ipsw; fi
+          ipsw version
+
+      - name: list the IPSW entries (so the dmg name is certain, not guessed)
+        run: |
+          mkdir -p "$RUNNER_TEMP/ipsw"
+          cd "$RUNNER_TEMP/ipsw"
+          # ipsw's info mode reads the remote manifest without downloading the whole image
+          ipsw info --remote "$IPSW_URL" > info.txt 2>&1 || true
+          grep -iE 'dmg|os|filesystem' info.txt | head -30 || true
+          ipsw extract --remote --help 2>&1 | head -30 || true
+
+      - name: fetch the OS dmg
+        run: |
+          cd "$RUNNER_TEMP/ipsw"
+          # Preferred: let ipsw pull only the filesystem dmg from the remote image.
+          set +e
+          ipsw extract --remote --dmg --filesystem "$IPSW_URL" -o . 2>&1 | tee dmg.log
+          set -e
+          ls -l *.dmg 2>/dev/null || true
+          if ! ls *.dmg >/dev/null 2>&1; then
+            echo "falling back to a full remote extract"
+            ipsw extract --remote "$IPSW_URL" -o . 2>&1 | tail -20
+          fi
+          ls -l | head -30
+          # AEA-encrypted or otherwise wrapped dmgs are expanded by ipsw itself; a raw ULFO/LZFSE dmg
+          # still mounts with hdiutil, so try the plain file names first.
+          ls -l *.dmg 2>/dev/null | head -10
+
+      - name: mount the OS volume read-only
+        run: |
+          cd "$RUNNER_TEMP/ipsw"
+          mkdir -p "$RUNNER_TEMP/os"
+          DMG=$(ls *.dmg 2>/dev/null | grep -iv cryptex | head -1)
+          echo "OS dmg: $DMG"
+          [ -n "$DMG" ] || { echo "no dmg found"; ls -l; exit 1; }
+          hdiutil attach -readonly -nobrowse -owners off -mountpoint "$RUNNER_TEMP/os" "$DMG" 2>&1 | tail -5 || {
+            echo "direct attach failed; trying ipsw img"; ipsw img info "$DMG" 2>&1 | head -10; exit 1; }
+          ls "$RUNNER_TEMP/os" | head
+          test -x "$RUNNER_TEMP/os/sbin/launchd" || { echo "not an OS volume"; exit 1; }
+
+      - name: build the Data seed
+        working-directory: UniXNU
+        run: |
+          set -x
+          ARGS=""
+          [ "${{ inputs.skip_setup }}" = "true" ] && ARGS="--skip-setup"
+          python3 scripts/make-data-seed.py "$RUNNER_TEMP/os" "$RUNNER_TEMP/seed.dbr" \
+            --gib "$GIB" --build 21H16 $ARGS
+          ls -l "$RUNNER_TEMP/seed.dbr"
+          shasum -a 256 "$RUNNER_TEMP/seed.dbr"
+
+      - name: verify the seed header
+        run: |
+          python3 - "$RUNNER_TEMP/seed.dbr" "$GIB" <<'PY'
+          import struct, sys
+          from pathlib import Path
+          b = Path(sys.argv[1]).read_bytes()
+          assert b[:8] == b'DBRDISK1', b[:8]
+          size = struct.unpack_from('<Q', b, 0x10)[0]
+          want = int(sys.argv[2]) * 1073741824
+          print('seed %d bytes, container %d bytes (%.2f GiB)' % (len(b), size, size / 1073741824))
+          assert size == want, 'container %d != %d' % (size, want)
+          print('header OK')
+          PY
+
+      - name: unmount
+        if: always()
+        run: hdiutil detach "$RUNNER_TEMP/os" 2>/dev/null || true
+
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuxi-ios17-data-seed-${{ inputs.gib }}gib
+          path: ${{ runner.temp }}/seed.dbr
+          if-no-files-found: error
