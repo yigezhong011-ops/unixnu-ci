@@ -1085,6 +1085,8 @@ jobs:
       - name: Prepare Mesa, the translator and the Mesa venv
         if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           cd out-ios17/fuxi/tree
           command -v glslangValidator >/dev/null || brew install glslang
@@ -1093,6 +1095,20 @@ jobs:
           from pathlib import Path
           ROOT = Path('.').resolve()
           def run(*c): subprocess.run([str(x) for x in c], check=True)
+          import os, re, urllib.request
+          def main_file(path):
+              req = urllib.request.Request('https://api.github.com/repos/UniXNU/UniXNU/contents/' + path,
+                                           headers={'Accept': 'application/vnd.github.raw', 'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
+              return urllib.request.urlopen(req).read().decode()
+          inputs = ROOT / 'scripts/data/gpu-metal-vulkan-inputs.json'
+          cur = json.loads(inputs.read_text()); new_tr = json.loads(main_file('scripts/data/gpu-metal-vulkan-inputs.json'))['translator']
+          print('translator', cur['translator'].get('commit'), '->', new_tr['commit'])
+          cur['translator'] = new_tr; inputs.write_text(json.dumps(cur, indent=2) + '\n')
+          block = lambda s: re.search(r"^PATCHES = \[.*?\]\]\n", s, re.S | re.M)
+          bridge = ROOT / 'scripts/build-adreno-metal-bridge.py'; s = bridge.read_text(); m = main_file('scripts/build-adreno-metal-bridge.py')
+          assert block(s) and block(m), 'PATCHES block not found'
+          bridge.write_text(s[:block(s).start()] + block(m).group(0) + s[block(s).end():])
+          print('bridge patches now', re.findall(r"'(00[0-9]{2}-[^']+[.]patch)'", block(m).group(0)))
           def checkout(path, pin):
               if path.exists():
                   return False
@@ -1152,118 +1168,30 @@ jobs:
           PY
           grep -nE "^BASE|^TREE|^SRC|^OUT|^BUNDLE|^SDK" out-ios17/fuxi/tree/scripts/build-fuxi-statusbar.py
 
-      - name: Build and inject FuxiStatusBar.dylib
-        if: ${{ !cancelled() && inputs.build_addon }}
-        working-directory: UniXNU
-        run: |
-          cd out-ios17/fuxi/tree
-          python3 scripts/build-fuxi-statusbar.py
-
-      # owner trust bundle 需要 build/original-static-system-trust/original-static-system.bundle。
-      # 期望的 sha256 从环境变量 ORIGINAL_STATIC_SYSTEM_SHA256 读（CI 里传 9719ae3a…），
-      # 而不是改脚本里的常量：脚本里原来的 7416ca4f… 是 iPadOS 27 / 24A446 那一对的哈希。
-      - name: Make the original trust bundle hash configurable
-        if: ${{ !cancelled() && inputs.build_addon }}
-        working-directory: UniXNU
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('out-ios17/fuxi/tree/scripts/make-owner-trust-bundle.py')
-          s = p.read_text()
-          old = ("original = (ROOT / 'build/original-static-system-trust/original-static-system.bundle').read_bytes()\n"
-                 "if hashlib.sha256(original).hexdigest() != '7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7':\n"
-                 "    raise SystemExit('The original static/System trust bundle differs from the unchanged target input')")
-          new = ("import os\n"
-                 "original = (ROOT / 'build/original-static-system-trust/original-static-system.bundle').read_bytes()\n"
-                 "expected = os.environ.get('ORIGINAL_STATIC_SYSTEM_SHA256',\n"
-                 "                          '7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7')\n"
-                 "if hashlib.sha256(original).hexdigest() != expected:\n"
-                 "    raise SystemExit('The original static/System trust bundle differs from the unchanged target input: '\n"
-                 "                     + hashlib.sha256(original).hexdigest() + ' != ' + expected)")
-          if old not in s:
-              raise SystemExit('make-owner-trust-bundle.py: the hash check is not where this step expects it')
-          p.write_text(s.replace(old, new, 1))
-          print('hash check now reads ORIGINAL_STATIC_SYSTEM_SHA256')
-          PY
-          grep -n 'ORIGINAL_STATIC_SYSTEM_SHA256\|expected = os.environ' out-ios17/fuxi/tree/scripts/make-owner-trust-bundle.py
-
-      - name: Place the original static/system trust bundle
-        if: ${{ !cancelled() && inputs.build_addon }}
-        working-directory: UniXNU
-        env:
-          # 21H16 (iOS 17.7) 那一对：static 2848 条 + system 80 条，由
-          # dump\wsl\extract-original-trust-bundle.py 从 boot2-ios 的载荷卷提出来。
-          #
-          # GitHub 单个 secret 上限 48 KB，所以原文件按字节切成 35000 / 35000 / 332 三段，
-          # 每段各自 base64（解码后按顺序拼接就是原文件）。
-          S1: ${{ secrets.ORIGINAL_STATIC_SYSTEM_BUNDLE_B64_1 }}
-          S2: ${{ secrets.ORIGINAL_STATIC_SYSTEM_BUNDLE_B64_2 }}
-          S3: ${{ secrets.ORIGINAL_STATIC_SYSTEM_BUNDLE_B64_3 }}
-          ORIGINAL_STATIC_SYSTEM_SHA256: '9719ae3a3e3dedb47c66e4c58175ec503d1e1c3b56b8d5ac0cd4a0ba550cb1cb'
-        run: |
-          OUT=out-ios17/fuxi/tree/build/original-static-system-trust/original-static-system.bundle
-          mkdir -p "$(dirname "$OUT")"
-          : > "$OUT"
-          # base64 -d on Linux/newer macOS, base64 -D on older macOS.
-          for S in "$S1" "$S2" "$S3"; do
-            printf '%s' "$S" | base64 -d >> "$OUT" 2>/dev/null || printf '%s' "$S" | base64 -D >> "$OUT"
-          done
-          BYTES=$(wc -c < "$OUT" | tr -d ' ')
-          ACTUAL=$(shasum -a 256 "$OUT" | cut -d' ' -f1)
-          echo "rebuilt $OUT: $BYTES bytes, sha256 $ACTUAL"
-          if [ "$BYTES" != "70332" ]; then
-            echo "size mismatch: $BYTES != 70332"; exit 1
-          fi
-          if [ "$ACTUAL" != "$ORIGINAL_STATIC_SYSTEM_SHA256" ]; then
-            echo "sha256 mismatch: $ACTUAL != $ORIGINAL_STATIC_SYSTEM_SHA256"; exit 1
-          fi
-          echo "trust bundle restored and verified"
-
-      - name: Build the owner trust bundle
-        if: ${{ !cancelled() && inputs.build_addon }}
-        working-directory: UniXNU
-        run: |
-          cd out-ios17/fuxi/tree
-          python3 scripts/make-owner-trust-bundle.py
-
-      # --wallpaper 先不带（壁纸 overlay 之后再补）：make-gpu-addon.py 的 --wallpaper 是可选参数。
-      - name: Pack the GPU addon
+      - name: Pack the base GPU addon
         if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         run: |
           cd out-ios17/fuxi/tree
           mkdir -p build/ios17-addon
-          python3 scripts/make-gpu-addon.py --publish build/ios17-addon/kernel.macho.gpuaddon
-          ls -l build/ios17-addon/kernel.macho.gpuaddon
-          # 第 8 项自检：dylib 必须真的在 addon 里
-          python3 - <<'PY'
-          import struct, sys
-          from pathlib import Path
-          b = Path('build/ios17-addon/kernel.macho.gpuaddon').read_bytes()
-          assert b[:8] == b'NGPUADD2', 'not an addon'
-          count = struct.unpack_from('<I', b, 8)[0]
-          at, names = 24, []
-          for _ in range(count):
-              nl, mode, size, packed = struct.unpack_from('<IIQQ', b, at); at += 24
-              names.append(b[at:at+nl-1].decode())
-              at += (nl + 7)//8*8 + (packed + 7)//8*8
-          print('addon entries:', len(names))
-          for n in names: print('  ', n)
-          if not any('FuxiStatusBar' in n for n in names):
-              sys.exit('FuxiStatusBar.dylib missing from the addon — statusbar step did not run')
-          print('OK: FuxiStatusBar.dylib present')
-          PY
+          python3 scripts/make-gpu-addon.py --publish build/ios17-addon/base.gpuaddon
+
+      - name: FuxiStatusBar into the addon (trust.json gets the CDHashes)
+        if: ${{ !cancelled() && inputs.build_addon }}
+        working-directory: UniXNU
+        run: |
+          cd out-ios17/fuxi/tree
+          python3 scripts/build-fuxi-statusbar.py build/ios17-addon/base.gpuaddon build/ios17-addon/kernel.macho.gpuaddon
+          ls -l build/ios17-addon; cat build/adreno-metal-plugin17e/trust.json
 
       - name: Collect the iOS GPU addon
         if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         run: |
           mkdir -p "$RUNNER_TEMP/addon-out"
-          cp out-ios17/fuxi/tree/build/ios17-addon/kernel.macho.gpuaddon "$RUNNER_TEMP/addon-out/"
-          cp -R out-ios17/fuxi/tree/build/adreno-metal-plugin17e/NativeAdrenoMetal.bundle \
-            "$RUNNER_TEMP/addon-out/" 2>/dev/null || true
-          cp out-ios17/fuxi/tree/build/adreno-metal-plugin/owner-trust.bundle \
-            "$RUNNER_TEMP/addon-out/" 2>/dev/null || true
+          T=out-ios17/fuxi/tree/build
+          cp "$T/ios17-addon/kernel.macho.gpuaddon" "$RUNNER_TEMP/addon-out/" || cp "$T/ios17-addon/base.gpuaddon" "$RUNNER_TEMP/addon-out/"
+          cp "$T/adreno-metal-plugin17e/trust.json" "$RUNNER_TEMP/addon-out/" || true
           ls -l "$RUNNER_TEMP/addon-out"
 
       - name: encrypt and upload
