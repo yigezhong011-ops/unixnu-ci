@@ -1141,7 +1141,8 @@ jobs:
         if: ${{ !cancelled() && inputs.build_addon }}
         run: |
           command -v rustup >/dev/null || { curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none; }
-          export PATH="$HOME/.cargo/bin:$PATH"; echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          RB=$(brew --prefix rustup 2>/dev/null)/bin
+          export PATH="$RB:$HOME/.cargo/bin:$PATH"; echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"; echo "$RB" >> "$GITHUB_PATH"
           rustup toolchain install 1.98.0 --profile minimal --component rust-src
           cargo +1.98.0 --version
 
