@@ -1125,6 +1125,37 @@ jobs:
             grep -n -A3 'SXNU_CONTROL_VERB_SHOTNEXT' "$TQ" | head -8
           fi
           exit 0
+      - name: tolerate fuxi watchdog shadow warnings
+        run: |
+          # kerfand_ref 82e4615 的 kits/sheng/BootWatchdogPolicy.c 用了 size_t total，
+          # 遮蔽 bsd/sys/vmmeter.h 的 extern struct vmtotal total；archive-22 用
+          # -Wall -Wextra -Werror 编它，于是 10 个 shadow 全变成错误。补 -Wno-shadow。
+          set +e
+          n=0
+          for f in $(find device device-ios17 -name 'build-ios17-legacy-display.py' -type f 2>/dev/null); do
+            python3 - "$f" <<'PY' || true
+          import sys
+          p = sys.argv[1]
+          try:
+              t = open(p).read()
+          except OSError:
+              sys.exit(0)
+          if '-Wno-shadow' in t:
+              print(p + ': already has -Wno-shadow')
+              sys.exit(0)
+          old = "['-mgeneral-regs-only', '-Wall', '-Wextra', '-Werror']"
+          new = "['-mgeneral-regs-only', '-Wall', '-Wextra', '-Wno-shadow', '-Werror']"
+          if old not in t:
+              print(p + ': compile-flag anchor not found', file=sys.stderr)
+              sys.exit(0)
+          open(p, 'w').write(t.replace(old, new, 1))
+          print(p + ': -Wno-shadow added')
+          PY
+            n=$((n+1))
+          done
+          echo "patched $n build script(s)"
+          exit 0
+
       - name: uefi-fuxi (pinned fuxi.dtb, read only)
         run: |
           # prepare-fuxi-gmu.py and friends read ../uefi-fuxi/Resources/DTBs/fuxi.dtb (pinned sha 0590a46c...).
@@ -1287,7 +1318,7 @@ jobs:
           def run(*c): subprocess.run([str(x) for x in c], check=True)
           import os, re, urllib.request
           def main_file(path):
-              req = urllib.request.Request('https://api.github.com/repos/UniXNU/UniXNU/contents/' + path,
+              req = urllib.request.Request('https://api.github.com/repos/SadNutWall/UniXNU/contents/' + path,
                                            headers={'Accept': 'application/vnd.github.raw', 'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
               return urllib.request.urlopen(req).read().decode()
           # translator 字段就是 metal2vulkan 的 commit：PATCHES 那 4 个 .rs 补丁必须和它配套。
