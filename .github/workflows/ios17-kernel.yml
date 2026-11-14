@@ -162,6 +162,32 @@ jobs:
           git apply "$RUNNER_TEMP/kerfand-metal-on-main.patch"
           grep -n 'NATIVE_ADRENO_IOS17_ARM64E' NativeAdrenoMetalPlugin.mm | head -6
 
+      - name: add native-user-jop-disable.patch (keyboard fix)
+        run: |
+          # Claude 的建议：上一轮把 kerfand 82e4615 的所有改动都套上，所以每轮只暴露一个新缺口。
+          # 键盘只需要 native-user-jop-disable.patch（2,113 B，只改 osfmk/arm64/locore.s）：
+          #   1) EL0_64_VECTOR 宏里，进内核前把 SCTLR_EL1 的 EnIA/EnIB/EnDA/EnDB 打开；
+          #   2) Lexception_return_restore_registers 里，返回非 arm64e 进程前再清掉。
+          # 这里从 82e4615 取那一个文件，放进 patches/xnu-10063-arm64e/（由第 6 步的 cp 创建）。
+          set +e
+          D=UniXNU/patches/xnu-10063-arm64e
+          mkdir -p "$D"
+          if [ -f "$D/native-user-jop-disable.patch" ]; then
+            echo "already present: $(wc -c < "$D/native-user-jop-disable.patch") bytes"
+            exit 0
+          fi
+          URL="https://raw.githubusercontent.com/Kerfand/UniXNU-Fuxi-Arm64e-iOS17/82e46156e8e0cebd331a8e152954b5ca3ffff7c7/unixnu/patches/xnu-10063-arm64e/native-user-jop-disable.patch"
+          if curl -fsSL "$URL" -o "$D/native-user-jop-disable.patch"; then
+            echo "fetched $(wc -c < "$D/native-user-jop-disable.patch") bytes"
+          else
+            echo "WARN: could not fetch the patch (build continues without it)" >&2
+            exit 0
+          fi
+          # 校验：必须是给 locore.s 的
+          grep -q 'osfmk/arm64/locore.s' "$D/native-user-jop-disable.patch" && echo "target: locore.s OK"
+          ls -l "$D" | tail -5
+          exit 0
+
       - name: fixture additions (pairings the boot (2) kernel had)
         working-directory: UniXNU
         run: |
