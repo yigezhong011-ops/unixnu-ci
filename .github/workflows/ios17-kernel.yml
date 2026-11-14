@@ -1152,6 +1152,47 @@ jobs:
           echo "submodule patches applied: $n"
           # 确认 scanout 符号现在有定义
           grep -rn 'fuxi_scanout_scale_air' UniXNU/drivers/AdrenoMetal 2>/dev/null | head -3
+
+          # 82e4615 在 AdrenoMetal 里加了 bridge/FuxiScanoutScaleAir.c（定义 fuxi_scanout_scale_air），
+          # 但没把它加进 build-adreno-metal-plugin.py 的编译/链接列表，于是插件链接时符号未定义。
+          # 这里补上：编译该 .c，并把它加到链接命令的源文件列表里。
+          for f in device/ios17/overlay/scripts/build-adreno-metal-plugin.py \
+                   device-ios17/scripts/build-adreno-metal-plugin.py \
+                   device/scripts/build-adreno-metal-plugin.py; do
+            [ -f "$f" ] || continue
+            python3 - "$f" <<'PY' || true
+          import sys
+          p = sys.argv[1]
+          try:
+              t = open(p).read()
+          except OSError:
+              sys.exit(0)
+          if 'FuxiScanoutScaleAir' in t:
+              print(p + ': already patched')
+              sys.exit(0)
+          # 1) 在 pm4 编译之后插入 fuxi air 的编译
+          pm4_anchor = "pm4 = OUT / 'AdrenoPM4.o'"
+          if pm4_anchor not in t:
+              print(p + ': pm4 anchor not found', file=sys.stderr)
+              sys.exit(0)
+          i = t.index(pm4_anchor)
+          j = t.index('\n', i) + 1
+          compile_line = (
+              "fuxi_air = OUT / 'FuxiScanoutScaleAir.o'\n"
+              "subprocess.run([*base, '-std=c11', '-c', ROOT / 'drivers/AdrenoMetal/bridge/FuxiScanoutScaleAir.c', '-o', fuxi_air], check=True)\n")
+          t = t[:j] + compile_line + t[j:]
+          # 2) 在链接命令里 pm4 之后加 fuxi_air
+          if 'pm4, BRIDGE' in t:
+              t = t.replace('pm4, BRIDGE', 'pm4, fuxi_air, BRIDGE', 1)
+          elif "'-x', 'none', pm4," in t:
+              t = t.replace("'-x', 'none', pm4,", "'-x', 'none', pm4, fuxi_air,", 1)
+          else:
+              print(p + ': link-command anchor not found', file=sys.stderr)
+              sys.exit(0)
+          open(p, 'w').write(t)
+          print(p + ': FuxiScanoutScaleAir.c wired in')
+          PY
+          done
           exit 0
 
       - name: tolerate fuxi watchdog shadow warnings
