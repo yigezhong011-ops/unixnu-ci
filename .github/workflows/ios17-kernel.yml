@@ -942,15 +942,37 @@ jobs:
           PY
           done
 
-      - name: tolerate the QUD anchor drift
+      - name: restore Kerfand's QcomUsbControl.h and tolerate anchor drift
         run: |
-          # Kerfand's 82e4615 added TAP/SWP verbs to kernel/QcomUsbControl.h, which moves the
-          # enum that prepare-fuxi-usb-debug.py pins with a hard-coded anchor. The console hook
-          # does not depend on that enum, so downgrade the hard failure to a warning.
+          # Two independent problems live in the archive-13 step; both are best-effort here.
+          #
+          # (1) qud_edit('kernel/QcomUsbControl.h', ...) anchors on
+          #         "    SXNU_CONTROL_VERB_REBOOT_FASTBOOT\n};\n"
+          #     Kerfand's QcomUsbControl.h (13,798 B) has that verb; upstream
+          #     xiaoleGun/QcomXnuUsbDebug @83be5782 (13,221 B) ends at SHOTNEXT. The
+          #     `cp -R device/drivers/QcomXnuUsbDebug/. $RUNNER_TEMP/qud/` step below is
+          #     supposed to overlay Kerfand's copy but leaves the upstream one in place.
+          #     The pristine Kerfand file is still under kerfand/, so restore it verbatim.
+          # (2) If some later revision moves that anchor again, downgrade the hard failure
+          #     to a warning: the console hook does not depend on the enum's tail.
+          #
           # bash -e (the default for run:) must not abort this step: everything is best-effort.
           set +e
+
+          KQ=kerfand/device/drivers/QcomXnuUsbDebug/kernel/QcomUsbControl.h
+          TQ=device/drivers/QcomXnuUsbDebug/kernel/QcomUsbControl.h
+          echo "kerfand copy: $( [ -f "$KQ" ] && echo "$(stat -f%z "$KQ" 2>/dev/null || stat -c%s "$KQ") bytes" || echo absent )"
+          echo "tree copy   : $( [ -f "$TQ" ] && echo "$(stat -f%z "$TQ" 2>/dev/null || stat -c%s "$TQ") bytes" || echo absent )"
+          if [ -f "$KQ" ] && [ -f "$TQ" ]; then
+            if grep -q 'SXNU_CONTROL_VERB_REBOOT_FASTBOOT' "$KQ" && ! grep -q 'SXNU_CONTROL_VERB_REBOOT_FASTBOOT' "$TQ"; then
+              cp -f "$KQ" "$TQ" && echo "restored Kerfand QcomUsbControl.h over the upstream one"
+            else
+              echo "no restore needed (target already has REBOOT_FASTBOOT, or source lacks it)"
+            fi
+          fi
+
           patched=0
-          for f in device/scripts/prepare-fuxi-usb-debug.py device-ios17/scripts/prepare-fuxi-usb-debug.py device/ios17/overlay/scripts/prepare-fuxi-usb-debug.py; do
+          for f in device/scripts/prepare-fuxi-usb-debug.py device-ios17/scripts/prepare-fuxi-usb-debug.py; do
             if [ ! -f "$f" ]; then
               echo "  (absent: $f)"
               continue
@@ -992,7 +1014,12 @@ jobs:
             if [ $? -eq 0 ]; then patched=$((patched+1)); fi
           done
           echo "anchor-drift patch: $patched file(s) processed"
-          # 不管结果如何都不阻断构建（上游之后修好了也不需要这一步）
+
+          # Verify the enum tail the archive step anchors on.
+          if [ -f "$TQ" ]; then
+            echo "--- $TQ enum tail ---"
+            grep -n -A3 'SXNU_CONTROL_VERB_SHOTNEXT' "$TQ" | head -8
+          fi
           exit 0
       - name: uefi-fuxi (pinned fuxi.dtb, read only)
         run: |
