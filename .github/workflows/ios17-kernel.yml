@@ -972,10 +972,12 @@ jobs:
           fi
 
           # The TAP/SWP implementation lives in kits/sheng/FuxiTouchProbe.cpp (UniXNU), which
-          # this workflow never patches; archive-22 compiles that file, not device/package/
-          # TouchProbe.cpp. QcomXnuUsbDebug.c already guards every call with `if (fuxi_touch_inject)`,
-          # so declaring it weak keeps the link working and makes TAP/SWP answer "unavailable"
-          # instead of failing the whole kernel build.
+          # this workflow never patches, while archive-22 compiles that file. Step 12 already
+          # declares the entry as `__attribute__((weak_import))`, but weak_import is a Mach-O
+          # dynamic-binding feature: it means nothing to a static kernel link (-undefined error),
+          # so the linker still fails with `Undefined symbols: "_fuxi_touch_inject"`.
+          # `__attribute__((weak))` is the static-link form: the reference resolves to 0 and the
+          # existing `if (fuxi_touch_inject)` guards make TAP/SWP answer "unavailable".
           for f in $(find device device-ios17 -path '*QcomXnuUsbDebug/kernel/QcomXnuUsbDebug.c' -type f 2>/dev/null); do
             python3 - "$f" <<'PY' || true
           import re, sys
@@ -984,29 +986,37 @@ jobs:
               t = open(p).read()
           except OSError:
               sys.exit(0)
-          if '__attribute__((weak))' in t and 'fuxi_touch_inject' in t:
-              print(p + ': already weak')
+          if 'fuxi_touch_inject' not in t:
+              print(p + ': no fuxi_touch_inject', file=sys.stderr)
               sys.exit(0)
+          # 只在 fuxi_touch_inject 的声明上把 weak_import 换成 weak（不要动别的符号）。
           pat = re.compile(
-              r'^extern\s+int\s+fuxi_touch_inject\s*\(([^)]*)\)\s*(?P<attr>__attribute__\(\(weak\)\))?\s*;',
-              re.M)
-          def repl(m):
-              return 'extern int fuxi_touch_inject(%s) __attribute__((weak));' % m.group(1)
-          try:
-              t2, n = pat.subn(repl, t)
-          except re.error as e:
-              print('%s: regex error (%s)' % (p, e), file=sys.stderr)
-              sys.exit(0)
+              r'(extern\s+int\s+fuxi_touch_inject\s*\([^)]*\)\s*)__attribute__\(\(weak_import\)\)',
+              re.S)
+          t2, n = pat.subn(r'\1__attribute__((weak))', t)
           if n == 0:
-              # 兜底：在第一个 extern int fuxi_touch_inject 行末尾插属性
-              print(p + ': fuxi_touch_inject extern not found (left unchanged)', file=sys.stderr)
+              # 已经是 weak，或者声明形态又变了：打印现场，便于下一轮定位。
+              for line in t.splitlines():
+                  if 'fuxi_touch_inject' in line:
+                      print(p + ': ' + line.strip()[:160], file=sys.stderr)
               sys.exit(0)
           try:
               open(p, 'w').write(t2)
           except OSError as e:
               print('%s: write failed (%s)' % (p, e), file=sys.stderr)
               sys.exit(0)
-          print(p + ': fuxi_touch_inject declared weak (%d site)' % n)
+          print(p + ': weak_import -> weak (%d site)' % n)
+          PY
+            python3 - "$f" <<'PY' || true
+          import sys
+          p = sys.argv[1]
+          try:
+              t = open(p).read()
+          except OSError:
+              sys.exit(0)
+          for i, line in enumerate(t.splitlines(), 1):
+              if 'fuxi_touch_inject' in line and ('weak' in line or 'extern' in line):
+                  print('  %s:%d: %s' % (p, i, line.strip()[:150]))
           PY
           done
 
