@@ -105,11 +105,18 @@ jobs:
           # Diffs: drop submodule pointer hunks (the checkouts above already set them).
           for f in "$K"/unixnu/diffs/*.diff; do
             n=$(basename "$f" .diff); p=.; [ "$n" = UniXNU ] || p=${n/_//}
+            # 2026-11-14: GpuScanoutClient.h in drivers_AdrenoMetal.diff comes from a local-only
+            # commit (5d56587); its first hunk renames a comment that 73d582fd already carries, so
+            # git apply rejects the whole file. scanout_scale lives in the other three files.
+            export SKIP_FILES=""
+            if [ "$n" = drivers_AdrenoMetal ]; then export SKIP_FILES="GpuScanoutClient.h"; fi
             python3 - "$f" "$RUNNER_TEMP/$n.diff" <<'PY'
-          import re, sys
+          import os, re, sys
           t = open(sys.argv[1], encoding='utf-8', errors='surrogateescape').read()
           parts = re.split(r'(?m)^(?=diff --git )', t)
-          keep = [p for p in parts if 'Subproject commit' not in p]
+          skip = [s for s in os.environ.get('SKIP_FILES', '').split(',') if s]
+          keep = [p for p in parts if 'Subproject commit' not in p
+                  and not any(p.startswith('diff --git a/' + s + ' ') for s in skip)]
           open(sys.argv[2], 'w', encoding='utf-8', errors='surrogateescape').write(''.join(keep))
           print(sys.argv[1], 'blocks', len(parts), 'kept', len(keep))
           PY
