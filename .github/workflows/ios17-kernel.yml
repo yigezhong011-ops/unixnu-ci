@@ -979,7 +979,7 @@ jobs:
           # SystemExit -> archive-13 fails. qud_edit returns early when the idempotency
           # marker is present, so plant it here: the TAP/SWP verbs step 12 added are the
           # same capability qud_edit was going to add.
-          for f in $(find device -path '*QcomXnuUsbDebug/kernel/QcomUsbControl.h' -type f 2>/dev/null); do
+          for f in $(find device \( -path '*QcomXnuUsbDebug/kernel/QcomUsbControl.h' -o -path '*QcomXnuUsbDebug/kernel/QcomXnuUsbDebug.c' \) -type f 2>/dev/null); do
             python3 - "$f" <<'PY' || true
           import sys
           p = sys.argv[1]
@@ -1290,10 +1290,29 @@ jobs:
               req = urllib.request.Request('https://api.github.com/repos/UniXNU/UniXNU/contents/' + path,
                                            headers={'Accept': 'application/vnd.github.raw', 'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
               return urllib.request.urlopen(req).read().decode()
-          # Kerfand 树的 translator pin 和 PATCHES 列表是配套的；从 UniXNU main 同步其中一样
-          # （而不动 metal2vulkan 源码）会让补丁应用到不匹配的源码上（
-          # 'patch does not apply'）。这里两样都不同步，沿用本树自带的版本。
-          print('skipped main sync of translator/PATCHES (keep the tree\'s own pins)')
+          # translator 字段就是 metal2vulkan 的 commit：PATCHES 那 4 个 .rs 补丁必须和它配套。
+          # 只从 main 同步其中一样（或两样都不同步但树里的 PATCHES 已过期）都会让补丁打不上：
+          #   patch does not apply: const_loads.rs:9 / mod.rs:508 / tests.rs:1678 / engine_arena.rs:1367
+          # 所以两样一起从 main 同步（源码版本随之被 checkout 按新 translator 拉取）。
+          inputs = ROOT / 'scripts/data/gpu-metal-vulkan-inputs.json'
+          if inputs.is_file():
+              cur = json.loads(inputs.read_text())
+              main_inputs = main_file('scripts/data/gpu-metal-vulkan-inputs.json')
+              if main_inputs:
+                  fresh = json.loads(main_inputs)
+                  if 'translator' in fresh:
+                      cur['translator'] = fresh['translator']
+                      inputs.write_text(json.dumps(cur, indent=2, sort_keys=True) + '\n')
+                      print('translator -> main', fresh['translator'].get('commit', '')[:12])
+              bridge = ROOT / 'scripts/build-adreno-metal-bridge.py'
+              if bridge.is_file():
+                  block = lambda s: re.search(r"^PATCHES = \[.*?\]\]\n", s, re.S | re.M)
+                  main_bridge = main_file('scripts/build-adreno-metal-bridge.py')
+                  if main_bridge and block(main_bridge) and block(bridge.read_text()):
+                      s = bridge.read_text()
+                      bridge.write_text(s[:block(s).start()] + block(main_bridge).group(0) +
+                                        s[block(s).end():])
+                      print('PATCHES -> main')
           def checkout(path, pin):
               if path.exists():
                   return False
