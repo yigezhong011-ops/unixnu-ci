@@ -1178,8 +1178,17 @@ jobs:
           i = t.index(pm4_anchor)
           j = t.index('\n', i) + 1
           compile_line = (
+              "# 1) 组装 shaders/scanout_convert.ll -> .bc（FuxiScanoutScaleAir.c 用 .incbin 嵌入它）\n"
+              "scanout_ll = ROOT / 'drivers/AdrenoMetal/shaders/scanout_convert.ll'\n"
+              "scanout_bc = OUT / 'scanout_convert.bc'\n"
+              "if scanout_ll.is_file():\n"
+              "    subprocess.run(['xcrun', 'llvm-as', str(scanout_ll), '-o', str(scanout_bc)], check=True)\n"
+              "else:\n"
+              "    raise SystemExit('missing ' + str(scanout_ll))\n"
+              "# 2) 编译 FuxiScanoutScaleAir.c，把 .bc 的绝对路径作为 FUXI_SCANOUT_AIR 传给 .incbin\n"
               "fuxi_air = OUT / 'FuxiScanoutScaleAir.o'\n"
-              "subprocess.run([*base, '-std=c11', '-c', ROOT / 'drivers/AdrenoMetal/bridge/FuxiScanoutScaleAir.c', '-o', fuxi_air], check=True)\n")
+              "subprocess.run([*base, '-std=c11', '-DFUXI_SCANOUT_AIR=' + str(scanout_bc.resolve()),\n"
+              "                '-c', ROOT / 'drivers/AdrenoMetal/bridge/FuxiScanoutScaleAir.c', '-o', fuxi_air], check=True)\n")
           t = t[:j] + compile_line + t[j:]
           # 2) 在链接命令里 pm4 之后加 fuxi_air
           if 'pm4, BRIDGE' in t:
