@@ -1,0 +1,76 @@
+name: fuxi iOS 17 grow the author's Data seed
+
+# Grows the author's empty 1 GiB Data seed (the one the kernel's hard-coded Data volume UUID belongs to) to N GiB with
+# UniXNU's scripts/seed-data-grow.py, which keeps the volume UUID and every file. The base seed comes from the
+# DATA_SEED_AUTHOR_XZ_B64 secret (xz, base64): it is never in this repository. The result is age-encrypted to
+# AGE_RECIPIENT before upload. macos-15: hdiutil on macos-26 finds no APFS container on the attached seed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      gib:
+        description: 'Data container size in GiB'
+        required: true
+        default: '64'
+      runner:
+        description: 'macOS runner label'
+        required: true
+        default: macos-15
+
+permissions:
+  contents: read
+
+env:
+  AGE_RECIPIENT: age1fsmu7pn6at08gvtl3c4yccy0m55eaepphv5puxgx2a3mt8qhnqfshlfqzr
+
+jobs:
+  grow:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    env:
+      GIB: ${{ inputs.gib }}
+    steps:
+      - name: Checkout UniXNU at the base commit
+        uses: actions/checkout@v4
+        with:
+          repository: SadNutWall/UniXNU
+          ref: dec111b629bb66d3ec195c653853d8916db42b2a
+          path: UniXNU
+          submodules: recursive
+
+      - name: base seed from the secret
+        env:
+          SEED_B64: ${{ secrets.DATA_SEED_AUTHOR_XZ_B64 }}
+        run: |
+          [ -n "$SEED_B64" ] || { echo "DATA_SEED_AUTHOR_XZ_B64 is empty"; exit 1; }
+          printf '%s' "$SEED_B64" | base64 -D | xz -dc > "$RUNNER_TEMP/base.dbr"
+          head -c 8 "$RUNNER_TEMP/base.dbr"; echo
+          shasum -a 256 "$RUNNER_TEMP/base.dbr" | cut -c1-16
+
+      - name: grow
+        working-directory: UniXNU
+        run: |
+          mkdir -p build
+          python3 scripts/seed-data-grow.py --gib "$GIB" "$RUNNER_TEMP/base.dbr" "$RUNNER_TEMP/seed.dbr"
+          python3 - "$RUNNER_TEMP/seed.dbr" "$GIB" <<'PY'
+          import struct, sys
+          b = open(sys.argv[1], 'rb').read()
+          assert b[:8] == b'DBRDISK1', b[:8]
+          size = struct.unpack_from('<Q', b, 0x10)[0]
+          print('seed %d bytes, container %.2f GiB' % (len(b), size / 2**30))
+          assert size == int(sys.argv[2]) * 2**30
+          PY
+
+      - name: encrypt
+        run: |
+          command -v age >/dev/null || brew install age
+          age -r "$AGE_RECIPIENT" -o "$RUNNER_TEMP/seed.dbr.age" "$RUNNER_TEMP/seed.dbr"
+          rm -f "$RUNNER_TEMP/seed.dbr" "$RUNNER_TEMP/base.dbr"
+          ls -l "$RUNNER_TEMP/seed.dbr.age"
+
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuxi-ios17-author-seed-${{ inputs.gib }}gib-age
+          path: ${{ runner.temp }}/seed.dbr.age
+          if-no-files-found: error
