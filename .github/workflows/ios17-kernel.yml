@@ -972,12 +972,16 @@ jobs:
           fi
 
           # The TAP/SWP implementation lives in kits/sheng/FuxiTouchProbe.cpp (UniXNU), which
-          # this workflow never patches, while archive-22 compiles that file. Step 12 already
-          # declares the entry as `__attribute__((weak_import))`, but weak_import is a Mach-O
-          # dynamic-binding feature: it means nothing to a static kernel link (-undefined error),
-          # so the linker still fails with `Undefined symbols: "_fuxi_touch_inject"`.
-          # `__attribute__((weak))` is the static-link form: the reference resolves to 0 and the
-          # existing `if (fuxi_touch_inject)` guards make TAP/SWP answer "unavailable".
+          # this workflow never patches, while archive-22 compiles that file. Step 12 declares
+          # the entry as `__attribute__((weak_import))`; that is a Mach-O dynamic-binding
+          # feature and means nothing to a static kernel link. A plain `__attribute__((weak))`
+          # *declaration* is not enough either: under arm64e the guard `if (fuxi_touch_inject)`
+          # compiles into an __auth_ptr entry (l_fuxi_touch_inject$auth_ptr$ia$...), which
+          # authenticates the address with autda and therefore cannot be NULL.
+          #
+          # So give it a real weak *definition*: the link then has a concrete address for the
+          # auth_ptr, TAP/SWP answer "unavailable" when the driver is absent, and a strong
+          # definition from FuxiTouchProbe.cpp (if it ever gets patched in) still overrides it.
           for f in $(find device device-ios17 -path '*QcomXnuUsbDebug/kernel/QcomXnuUsbDebug.c' -type f 2>/dev/null); do
             python3 - "$f" <<'PY' || true
           import re, sys
@@ -986,37 +990,57 @@ jobs:
               t = open(p).read()
           except OSError:
               sys.exit(0)
-          if 'fuxi_touch_inject' not in t:
-              print(p + ': no fuxi_touch_inject', file=sys.stderr)
+          if 'fuxi_touch_inject_stub_20261114' in t:
+              print(p + ': stub already present')
               sys.exit(0)
-          # 只在 fuxi_touch_inject 的声明上把 weak_import 换成 weak（不要动别的符号）。
+          if 'fuxi_touch_inject' not in t:
+              print(p + ': no fuxi_touch_inject reference', file=sys.stderr)
+              sys.exit(0)
+          # 1) 先把弱导入/弱声明归一化成普通声明（函数体由我们提供）
           pat = re.compile(
-              r'(extern\s+int\s+fuxi_touch_inject\s*\([^)]*\)\s*)__attribute__\(\(weak_import\)\)',
+              r'extern\s+int\s+fuxi_touch_inject\s*\(([^)]*)\)\s*'
+              r'__attribute__\(\(\s*weak(?:_import)?\s*\)\)\s*;',
               re.S)
-          t2, n = pat.subn(r'\1__attribute__((weak))', t)
-          if n == 0:
-              # 已经是 weak，或者声明形态又变了：打印现场，便于下一轮定位。
+          def to_decl(m):
+              return 'extern int fuxi_touch_inject(%s);' % m.group(1)
+          t, n1 = pat.subn(to_decl, t)
+          if n1 == 0 and 'extern int fuxi_touch_inject' not in t:
               for line in t.splitlines():
                   if 'fuxi_touch_inject' in line:
-                      print(p + ': ' + line.strip()[:160], file=sys.stderr)
+                      print(p + ': ' + line.strip()[:150], file=sys.stderr)
               sys.exit(0)
+          # 2) 在第一个 #include "QcomUsbControl.h" 之后插入 weak 定义
+          stub = (
+              '\n/* fuxi_touch_inject_stub_20261114: fallback definition so the arm64e __auth_ptr entry for\n'
+              ' * the TAP/SWP guard has a real address when the board touch driver is not linked in.\n'
+              ' * A strong definition from the touch driver overrides this weak one. */\n'
+              'int fuxi_touch_inject(int x0, int y0, int x1, int y1, int steps, int milliseconds)\n'
+              '    __attribute__((weak));\n'
+              'int fuxi_touch_inject(int x0, int y0, int x1, int y1, int steps, int milliseconds)\n'
+              '{\n'
+              '    (void)x0; (void)y0; (void)x1; (void)y1; (void)steps; (void)milliseconds;\n'
+              '    return -1;\n'
+              '}\n')
+          anchor = '#include "QcomUsbControl.h"'
+          if anchor in t:
+              t = t.replace(anchor, anchor + stub, 1)
+          else:
+              # 兜底：放到文件前 40 行内第一个 #include 之后
+              lines = t.splitlines(True)
+              for i, line in enumerate(lines[:40]):
+                  if line.lstrip().startswith('#include'):
+                      lines.insert(i + 1, stub)
+                      t = ''.join(lines)
+                      break
+              else:
+                  print(p + ': no include anchor (unchanged)', file=sys.stderr)
+                  sys.exit(0)
           try:
-              open(p, 'w').write(t2)
+              open(p, 'w').write(t)
           except OSError as e:
               print('%s: write failed (%s)' % (p, e), file=sys.stderr)
               sys.exit(0)
-          print(p + ': weak_import -> weak (%d site)' % n)
-          PY
-            python3 - "$f" <<'PY' || true
-          import sys
-          p = sys.argv[1]
-          try:
-              t = open(p).read()
-          except OSError:
-              sys.exit(0)
-          for i, line in enumerate(t.splitlines(), 1):
-              if 'fuxi_touch_inject' in line and ('weak' in line or 'extern' in line):
-                  print('  %s:%d: %s' % (p, i, line.strip()[:150]))
+          print(p + ': weak stub added (%d declaration(s) normalised)' % n1)
           PY
           done
 
