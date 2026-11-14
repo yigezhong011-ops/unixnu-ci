@@ -947,17 +947,26 @@ jobs:
           # Kerfand's 82e4615 added TAP/SWP verbs to kernel/QcomUsbControl.h, which moves the
           # enum that prepare-fuxi-usb-debug.py pins with a hard-coded anchor. The console hook
           # does not depend on that enum, so downgrade the hard failure to a warning.
-          # Both copies: device/scripts and the iOS overlay's own.
+          # bash -e (the default for run:) must not abort this step: everything is best-effort.
+          set +e
           patched=0
           for f in device/scripts/prepare-fuxi-usb-debug.py device-ios17/scripts/prepare-fuxi-usb-debug.py device/ios17/overlay/scripts/prepare-fuxi-usb-debug.py; do
-          [ -f "$f" ] || continue
-          [ -L "$f" ] && { echo "$f is a link, skipped"; continue; }
-          python3 - "$f" <<'PY'
+            if [ ! -f "$f" ]; then
+              echo "  (absent: $f)"
+              continue
+            fi
+            if [ -L "$f" ]; then
+              echo "  (symlink, skipped: $f)"
+              continue
+            fi
+            python3 - "$f" <<'PY' || true
           import re, sys
           p = sys.argv[1]
-          t = open(p).read()
-          # 典型形式：raise SystemExit(f'{path}: usb control anchor changed: {anchor}')
-          # 或 sys.exit("... usb control anchor changed ...")
+          try:
+              t = open(p).read()
+          except OSError as e:
+              print('%s: unreadable (%s)' % (p, e), file=sys.stderr)
+              sys.exit(0)
           pat = re.compile(
               r"(?P<indent>[ \t]*)(?P<call>raise\s+(?:SystemExit|ValueError|RuntimeError)\s*\(|sys\.exit\s*\()"
               r"(?P<arg>[^)\n]*usb control anchor[^)\n]*)\)",
@@ -965,20 +974,26 @@ jobs:
           def repl(m):
               return ("%(i)sprint('QUD anchor drift tolerated:%%s' %% (%(a)s,), file=sys.stderr)"
                       % {'i': m.group('indent'), 'a': m.group('arg')})
-          t2, n = pat.subn(repl, t)
+          try:
+              t2, n = pat.subn(repl, t)
+          except re.error as e:
+              print('%s: regex error (%s)' % (p, e), file=sys.stderr)
+              sys.exit(0)
           if n == 0:
               print(p + ': anchor pattern not found (left unchanged)', file=sys.stderr)
-              sys.exit(2)
-          open(p, 'w').write(t2)
+              sys.exit(0)
+          try:
+              open(p, 'w').write(t2)
+          except OSError as e:
+              print('%s: write failed (%s)' % (p, e), file=sys.stderr)
+              sys.exit(0)
           print(p + ': %d anchor check(s) downgraded to warning' % n)
           PY
-          rc=$?
-          if [ $rc -eq 0 ]; then patched=$((patched+1)); else echo "  (not patched: $f)"; fi
+            if [ $? -eq 0 ]; then patched=$((patched+1)); fi
           done
-          echo "anchor-drift patch: $patched file(s)"
-          # 一个都没打上也继续（可能上游之后修了），不阻断构建
+          echo "anchor-drift patch: $patched file(s) processed"
+          # 不管结果如何都不阻断构建（上游之后修好了也不需要这一步）
           exit 0
-
       - name: uefi-fuxi (pinned fuxi.dtb, read only)
         run: |
           # prepare-fuxi-gmu.py and friends read ../uefi-fuxi/Resources/DTBs/fuxi.dtb (pinned sha 0590a46c...).
