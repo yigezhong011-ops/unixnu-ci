@@ -971,6 +971,45 @@ jobs:
             fi
           fi
 
+          # The TAP/SWP implementation lives in kits/sheng/FuxiTouchProbe.cpp (UniXNU), which
+          # this workflow never patches; archive-22 compiles that file, not device/package/
+          # TouchProbe.cpp. QcomXnuUsbDebug.c already guards every call with `if (fuxi_touch_inject)`,
+          # so declaring it weak keeps the link working and makes TAP/SWP answer "unavailable"
+          # instead of failing the whole kernel build.
+          for f in $(find device device-ios17 -path '*QcomXnuUsbDebug/kernel/QcomXnuUsbDebug.c' -type f 2>/dev/null); do
+            python3 - "$f" <<'PY' || true
+          import re, sys
+          p = sys.argv[1]
+          try:
+              t = open(p).read()
+          except OSError:
+              sys.exit(0)
+          if '__attribute__((weak))' in t and 'fuxi_touch_inject' in t:
+              print(p + ': already weak')
+              sys.exit(0)
+          pat = re.compile(
+              r'^extern\s+int\s+fuxi_touch_inject\s*\(([^)]*)\)\s*(?P<attr>__attribute__\(\(weak\)\))?\s*;',
+              re.M)
+          def repl(m):
+              return 'extern int fuxi_touch_inject(%s) __attribute__((weak));' % m.group(1)
+          try:
+              t2, n = pat.subn(repl, t)
+          except re.error as e:
+              print('%s: regex error (%s)' % (p, e), file=sys.stderr)
+              sys.exit(0)
+          if n == 0:
+              # 兜底：在第一个 extern int fuxi_touch_inject 行末尾插属性
+              print(p + ': fuxi_touch_inject extern not found (left unchanged)', file=sys.stderr)
+              sys.exit(0)
+          try:
+              open(p, 'w').write(t2)
+          except OSError as e:
+              print('%s: write failed (%s)' % (p, e), file=sys.stderr)
+              sys.exit(0)
+          print(p + ': fuxi_touch_inject declared weak (%d site)' % n)
+          PY
+          done
+
           patched=0
           for f in device/scripts/prepare-fuxi-usb-debug.py device-ios17/scripts/prepare-fuxi-usb-debug.py; do
             if [ ! -f "$f" ]; then
