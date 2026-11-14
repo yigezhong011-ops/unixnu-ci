@@ -971,6 +971,37 @@ jobs:
             fi
           fi
 
+          # qud_edit (kerfand_ref 82e4615's build-fuxi-usb-debug.py) rewrites
+          # kernel/QcomUsbControl.h with the anchor
+          #     "    SXNU_CONTROL_VERB_REBOOT_FASTBOOT\n};\n"
+          # but step 12's touch-kernel.patch already appended TAP/SWP to that enum, so
+          # REBOOT_FASTBOOT is followed by a comma and the anchor never matches ->
+          # SystemExit -> archive-13 fails. qud_edit returns early when the idempotency
+          # marker is present, so plant it here: the TAP/SWP verbs step 12 added are the
+          # same capability qud_edit was going to add.
+          for f in $(find device -path '*QcomXnuUsbDebug/kernel/QcomUsbControl.h' -type f 2>/dev/null); do
+            python3 - "$f" <<'PY' || true
+          import sys
+          p = sys.argv[1]
+          try:
+              t = open(p).read()
+          except OSError:
+              sys.exit(0)
+          if 'fuxi-usb-control-20261112' in t:
+              print(p + ': marker already present')
+              sys.exit(0)
+          # 放在文件最前面的注释里，最不容易和别的替换冲突
+          head = '/* fuxi-usb-control-20261112: TAP/SWP verbs are installed by the CI patch step; '
+          head += 'this marker makes kerfand build-fuxi-usb-debug.py qud_edit skip its own copy. */\n'
+          try:
+              open(p, 'w').write(head + t)
+          except OSError as e:
+              print('%s: write failed (%s)' % (p, e), file=sys.stderr)
+              sys.exit(0)
+          print(p + ': idempotency marker planted')
+          PY
+          done
+
           # The TAP/SWP implementation lives in kits/sheng/FuxiTouchProbe.cpp (UniXNU), which
           # this workflow never patches, while archive-22 compiles that file. Step 12 declares
           # the entry as `__attribute__((weak_import))`; that is a Mach-O dynamic-binding
