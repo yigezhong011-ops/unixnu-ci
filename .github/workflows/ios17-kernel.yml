@@ -1573,6 +1573,35 @@ jobs:
         working-directory: UniXNU
         run: |
           cd out-ios17/fuxi/tree
+          # Metal 卡死：装上游 2bbb39d（sweep retired buffers only when the buffer cache misses）
+          # sheng-log 实测：Submit 平均 1.13 秒/次、WaitFence 44% 超时、scanout 每次等满 500 ms、
+          # 16 秒内 map +342 / unmap +493，而 fence pauses slept=27815 spun=6（不是自旋）。
+          # 该补丁把「每次分配前都清扫已退休 BO」改成「只在 buffer cache 未命中时才清扫」，
+          # 并把 retire 锁改成 trylock —— 正是砍掉那批 map/unmap 内核调用。
+          # mesa commit 与我们完全相同（85fda3b3），补丁可直接应用。
+          if [ -f "patches/mesa/turnip-darwin-sweep-retired-on-cache-miss.patch" ]; then
+            echo "sweep-retired patch already present"
+          else
+            curl -fsSL "https://raw.githubusercontent.com/UniXNU/UniXNU/0c1bac3d51a3009dca1708b15a5198f4b43d057a/patches/mesa/turnip-darwin-sweep-retired-on-cache-miss.patch" -o "patches/mesa/turnip-darwin-sweep-retired-on-cache-miss.patch" \
+              && echo "fetched sweep-retired patch: $(wc -c < 'patches/mesa/turnip-darwin-sweep-retired-on-cache-miss.patch') bytes" \
+              || echo "WARN: could not fetch the sweep-retired patch" >&2
+          fi
+          python3 - scripts/data/adreno-compiler-inputs.json <<'PY'
+          import json, sys
+          p = sys.argv[1]
+          d = json.load(open(p))
+          name = "patches/mesa/turnip-darwin-sweep-retired-on-cache-miss.patch"
+          have = d.get("patches") or []
+          if name not in have:
+              have.append(name)
+              d["patches"] = have
+              with open(p, "w") as f:
+                  json.dump(d, f, indent=2)
+                  f.write("\n")
+              print("patches now:", len(have))
+          else:
+              print("already in the patch list:", len(have))
+          PY
           python3 scripts/build-turnip-darwin.py --target ios17e
 
       - name: Rust 1.98.0 with rust-src (the bridge builds std for arm64e)
