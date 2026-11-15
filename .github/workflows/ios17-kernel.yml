@@ -1433,34 +1433,6 @@ jobs:
           export UNIXNU_OUT="$PWD/out-ios17" UNIXNU_KERNELCACHE="$PWD/out-ios17/ipsw/21H16/kernelcache.decompressed"
           [ -f ../device/scripts/extract-files.py ] && python3 ../device/scripts/extract-files.py --device ../device || echo "extract-files skipped/failed"
           ./unixnu defconfig fuxi_ios17_kernel_defconfig -D ../device-ios17
-          # ★ 壁纸：把 poster 扩展加进 GPU 沙盒放行名单（扫所有可能的 GpuPowerProbe.cpp）
-          # GpuPowerProbe.cpp 的 NativeSandboxGrantProcess 只写了 PosterBoard，而真正跑壁纸的是它的
-          # 两个扩展 AegirPoster / KaleidoscopePoster（alioth.md:320 记录过同样的错；t50 日志实证：
-          # "IOUC AGXDeviceUserClient failed MACF in process pid 236, AegirPoster"）。
-          # 注意：GitHub 的 run 是 bash -e，所以这里每条命令都必须永不失败，
-          # 否则像上一轮那样 `ls -d 不存在的目录 && ...` 会把整个 kernel 步骤带崩。
-          for GP in \
-              "$UNIXNU_OUT/fuxi/tree/kits/sheng/GpuPowerProbe.cpp" \
-              "$UNIXNU_OUT/fuxi/tree/package/GpuPowerProbe.cpp" \
-              "../device/package/GpuPowerProbe.cpp" \
-              "$UNIXNU_OUT/fuxi/tree/build/native-legacy-display/GpuPowerProbe.ios17.cpp"; do
-            if [ ! -f "$GP" ]; then
-              echo "skip (absent): $GP"
-              continue
-            fi
-            if grep -q 'AegirPoster' "$GP"; then
-              echo "already: $GP"
-            else
-              sed -i 's/WidgetRenderer_Default,PosterBoard"/WidgetRenderer_Default,PosterBoard,AegirPoster,KaleidoscopePoster"/' "$GP" || true
-              echo "patched: $GP"
-            fi
-            grep -o 'backboardd,iconservicesagent[^"]*' "$GP" 2>/dev/null | head -1 || true
-          done
-          echo "--- 目录探查 ---"
-          ls -d "$UNIXNU_OUT/fuxi/tree/kits" 2>/dev/null || echo "  (tree/kits absent)"
-          ls "$UNIXNU_OUT/fuxi/tree/kits" 2>/dev/null | head -8 || true
-          find "$UNIXNU_OUT/fuxi/tree" -maxdepth 3 -name 'GpuPowerProbe*.cpp' 2>/dev/null | head -8 || true
-          echo "--- 探查结束（这一行出现说明本段没有提前退出）---"
 
 
           T="$PWD/out-ios17/fuxi/tree"
@@ -1470,6 +1442,22 @@ jobs:
           # prelink, which fails without the reference; then build the reference, then the kernel again.
           if ! ./unixnu build kernel -D ../device-ios17 -j 4; then
             test -d "$T/.cache/xnu-work"
+          # ★ 壁纸：把 poster 扩展加进 GPU 沙盒放行名单
+          # NativeSandboxGrantProcess 原来只写 PosterBoard，而真正跑壁纸的是它的两个扩展
+          # AegirPoster / KaleidoscopePoster（alioth.md:320 记录同样的错；t50 日志实证
+          # "IOUC AGXDeviceUserClient failed MACF in process pid 236, AegirPoster"）。
+          # 位置很关键：必须在这里（第一次 build kernel 之后），因为 <tree>/kits/sheng/
+          # 是第一次 build 才铺开的；放在 defconfig 之后会因文件不存在而全部跳过。
+          for GP in $(find "$T" -name 'GpuPowerProbe.cpp' 2>/dev/null); do
+            if grep -q 'AegirPoster' "$GP"; then
+              echo "already: $GP"
+            else
+              sed -i 's/WidgetRenderer_Default,PosterBoard"/WidgetRenderer_Default,PosterBoard,AegirPoster,KaleidoscopePoster"/' "$GP" || true
+              echo "patched: $GP"
+            fi
+            grep -o 'backboardd,iconservicesagent[^"]*' "$GP" 2>/dev/null | head -1 || true
+          done
+          echo "--- poster grant done ---"
             echo "=== RELEASE LTO reference"
             # The stub pass only picks undefined names that start with "_"; ld prints C++ names demangled
             # (run 11: "OSValueObject<int>::MetaClass::MetaClass()"). Map those back to their mangled names
@@ -1627,6 +1615,30 @@ jobs:
         if: ${{ !cancelled() && inputs.build_addon }}
         working-directory: UniXNU
         run: |
+          cd out-ios17/fuxi/tree
+          # FuxiScanoutScaleAir.c 本应由第 18 步的 AdrenoMetal.patch 创建，但那个 patch
+          # 只要有一个文件 apply --check 失败就整块 skip，于是这个 .c 不存在，
+          # 而 build-adreno-metal-plugin.py 会硬编译它 -> "no such file"。
+          # scanout_scale（逻辑分辨率）不是本轮目标，所以缺文件时把那段编译改成条件执行，
+          # 保证 sweep-retired 的新 turnip 能被打进 addon。
+          if [ ! -f drivers/AdrenoMetal/bridge/FuxiScanoutScaleAir.c ]; then
+            echo "WARN: FuxiScanoutScaleAir.c missing; make its compile optional" >&2
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path("scripts/build-adreno-metal-plugin.py")
+          s = p.read_text()
+          if "FUXI_AIR_OPTIONAL" not in s:
+              old = "subprocess.run([*base, '-std=c11', '-DFUXI_SCANOUT_AIR=' + str(scanout_bc.resolve()),"
+              if old in s:
+                  i = s.index(old)
+                  j = s.index("check=True)", i) + len("check=True)")
+                  s = s[:i] + "if (ROOT / 'drivers/AdrenoMetal/bridge/FuxiScanoutScaleAir.c').is_file():  # FUXI_AIR_OPTIONAL\n    " + s[i:j].replace(chr(10), chr(10) + "    ") + s[j:]
+                  p.write_text(s)
+                  print("patched: FuxiScanoutScaleAir compile is now conditional")
+              else:
+                  print("anchor not found; leaving the script as is")
+          PY
+          fi
           cd out-ios17/fuxi/tree
           python3 scripts/build-adreno-metal-plugin.py --target ios17e --no-replay
 
