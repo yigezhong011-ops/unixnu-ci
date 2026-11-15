@@ -1343,6 +1343,83 @@ jobs:
           ./unixnu tree -D ../device-ios17
           ls out-ios17/fuxi/tree/scripts | grep -E 'turnip|metal-plugin|statusbar|gpu-addon|owner-trust'
 
+      - name: staged-apps probe (add printf into the xnu patch so the stage shows in COM3)
+        run: |
+          # 用户把"应用补全"交给 DeepSeek 全权负责。sheng-staged-apps=1 在 persist=2 的已存在
+          # Data 上没生效，而 native_staged_apps_* 这组变量在整个仓库里零读取（哑变量），
+          # 所以先让它能被看见：往 device/patches/xnu/zzy-staged-system-apps.patch 的三处
+          # stage 赋值后面各加一行 printf，kernel 编译时自然带上。
+          #
+          # 输出（COM3 里 grep "SA"）：
+          #   SA3 <errno>              标记文件已存在 → 跳过
+          #   SA-1 <errno>             找不到源目录（OS 卷没有 staged_system_apps）
+          #   SA2 <dirs> <files> <mib> 复制完成
+          set +e
+          python3 - <<'PY'
+          import re, sys
+          from pathlib import Path
+
+          p = Path('device/patches/xnu/zzy-staged-system-apps.patch')
+          if not p.is_file():
+              sys.exit('patch not found: %s' % p)
+          lines = p.read_text(encoding='utf-8', errors='surrogateescape').splitlines(keepends=True)
+
+          # 三处 stage 赋值后面各插一行 printf（patch 里以 + 开头）
+          INJECT = {
+              'native_staged_apps_stage = 3;':
+                  '+\tprintf("SA3 %d\\n", native_staged_apps_error);\n',
+              'native_staged_apps_stage = -1;':
+                  '+\tprintf("SA-1 %d\\n", native_staged_apps_error);\n',
+              'native_staged_apps_stage = 2;':
+                  '+\tprintf("SA2 %d %d %d\\n", native_staged_apps_dirs,'
+                  ' native_staged_apps_files, native_staged_apps_mib);\n',
+          }
+          added = 0
+          out = []
+          for line in lines:
+              out.append(line)
+              body = line[1:] if line.startswith('+') else None
+              if body is None:
+                  continue
+              for key, ins in INJECT.items():
+                  if body.strip() == key:
+                      out.append(ins)
+                      added += 1
+                      break
+          if not added:
+              sys.exit('no injection point matched (patch layout changed?)')
+
+          # 调整每个 hunk 头的 +count（只调整被注入过的 hunk）
+          text = ''.join(out)
+          # 按 hunk 切分，统计每个 hunk 里的新增行数变化
+          parts = re.split(r'(?m)^(?=@@ )', text)
+          fixed = []
+          for part in parts:
+              m = re.match(r'@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', part)
+              if not m:
+                  fixed.append(part)
+                  continue
+              n_add = sum(1 for ln in part.splitlines()[1:] if ln.startswith('+'))
+              # 原始 hunk 里我们新加了几行：按 INJECT 命中次数算
+              hits = 0
+              for ln in part.splitlines()[1:]:
+                  b = ln[1:] if ln.startswith('+') else ''
+                  for key in INJECT:
+                      if b.strip() == key:
+                          hits += 1
+              if hits:
+                  newc = int(m.group(4) or 1) + hits
+                  head = '@@ -%s%s +%s,%d @@' % (
+                      m.group(1), (',' + m.group(2)) if m.group(2) else '',
+                      m.group(3), newc)
+                  part = head + part[m.end():]
+              fixed.append(part)
+          p.write_text(''.join(fixed), encoding='utf-8', errors='surrogateescape')
+          print('patched %s: %d printf injected' % (p, added))
+          PY
+          grep -c 'printf("SA' device/patches/xnu/zzy-staged-system-apps.patch
+          exit 0
+
       - name: kernel
         if: ${{ inputs.build_kernel }}
         working-directory: UniXNU
