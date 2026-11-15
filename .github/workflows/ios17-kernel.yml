@@ -1463,13 +1463,6 @@ jobs:
           echo "--- 探查结束（这一行出现说明本段没有提前退出）---"
 
 
-            grep -c 'AegirPoster' "$GP" || true
-          else
-            echo "WARN: $GP not found; poster extensions not added" >&2
-            ls -la "$UNIXNU_OUT/fuxi/tree/kits" 2>/dev/null | head -10
-            ls -la "$UNIXNU_OUT/fuxi/tree/kits/sheng" 2>/dev/null | head -20
-          fi
-
           T="$PWD/out-ios17/fuxi/tree"
           REF="$T/build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf"
           # The prelink step matches against a symbol-bearing RELEASE (LTO) comparison kernel built from the same xnu
