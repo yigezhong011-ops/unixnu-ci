@@ -1437,26 +1437,31 @@ jobs:
           # GpuPowerProbe.cpp 的 NativeSandboxGrantProcess 只写了 PosterBoard，而真正跑壁纸的是它的
           # 两个扩展 AegirPoster / KaleidoscopePoster（alioth.md:320 记录过同样的错；t50 日志实证：
           # "IOUC AGXDeviceUserClient failed MACF in process pid 236, AegirPoster"）。
-          # build-ios17-legacy-display.py 读 <tree>/kits/sheng/GpuPowerProbe.cpp 并生成
-          # <tree>/build/native-legacy-display/GpuPowerProbe.ios17.cpp 去编译，所以这里
-          # 把所有能读到的 GpuPowerProbe*.cpp 都补上，改完逐个打印确认。
+          # 注意：GitHub 的 run 是 bash -e，所以这里每条命令都必须永不失败，
+          # 否则像上一轮那样 `ls -d 不存在的目录 && ...` 会把整个 kernel 步骤带崩。
           for GP in \
               "$UNIXNU_OUT/fuxi/tree/kits/sheng/GpuPowerProbe.cpp" \
               "$UNIXNU_OUT/fuxi/tree/package/GpuPowerProbe.cpp" \
               "../device/package/GpuPowerProbe.cpp" \
               "$UNIXNU_OUT/fuxi/tree/build/native-legacy-display/GpuPowerProbe.ios17.cpp"; do
-            [ -f "$GP" ] || { echo "skip (absent): $GP"; continue; }
+            if [ ! -f "$GP" ]; then
+              echo "skip (absent): $GP"
+              continue
+            fi
             if grep -q 'AegirPoster' "$GP"; then
               echo "already: $GP"
             else
-              sed -i 's/WidgetRenderer_Default,PosterBoard"/WidgetRenderer_Default,PosterBoard,AegirPoster,KaleidoscopePoster"/' "$GP"
-              echo "patched: $GP  AegirPoster=$(grep -c AegirPoster "$GP")"
+              sed -i 's/WidgetRenderer_Default,PosterBoard"/WidgetRenderer_Default,PosterBoard,AegirPoster,KaleidoscopePoster"/' "$GP" || true
+              echo "patched: $GP"
             fi
-            grep -o 'backboardd,iconservicesagent[^"]*' "$GP" | head -1
+            grep -o 'backboardd,iconservicesagent[^"]*' "$GP" 2>/dev/null | head -1 || true
           done
-          echo "--- 目录探查（万一上面全 absent）---"
-          ls -d "$UNIXNU_OUT/fuxi/tree/kits" 2>/dev/null && ls "$UNIXNU_OUT/fuxi/tree/kits" 2>/dev/null | head -8
-          find "$UNIXNU_OUT/fuxi/tree" -maxdepth 3 -name 'GpuPowerProbe*.cpp' 2>/dev/null | head -8
+          echo "--- 目录探查 ---"
+          ls -d "$UNIXNU_OUT/fuxi/tree/kits" 2>/dev/null || echo "  (tree/kits absent)"
+          ls "$UNIXNU_OUT/fuxi/tree/kits" 2>/dev/null | head -8 || true
+          find "$UNIXNU_OUT/fuxi/tree" -maxdepth 3 -name 'GpuPowerProbe*.cpp' 2>/dev/null | head -8 || true
+          echo "--- 探查结束（这一行出现说明本段没有提前退出）---"
+
 
             grep -c 'AegirPoster' "$GP" || true
           else
