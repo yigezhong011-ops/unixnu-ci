@@ -1617,27 +1617,19 @@ jobs:
         run: |
           cd out-ios17/fuxi/tree
           # FuxiScanoutScaleAir.c 本应由第 18 步的 AdrenoMetal.patch 创建，但那个 patch
-          # 只要有一个文件 apply --check 失败就整块 skip，于是这个 .c 不存在，
-          # 而 build-adreno-metal-plugin.py 会硬编译它 -> "no such file"。
-          # scanout_scale（逻辑分辨率）不是本轮目标，所以缺文件时把那段编译改成条件执行，
-          # 保证 sweep-retired 的新 turnip 能被打进 addon。
+          # 只要有一个文件 apply --check 失败就整块 skip，于是这个 .c 缺失；
+          # 而 build-adreno-metal-plugin.py 既要编译它、又要在链接时引用它的 .o，
+          # 所以必须补出真正的源码（内容取自 device/ios17/submodule-patches/
+          # AdrenoMetal.patch 的 bridge/FuxiScanoutScaleAir.c 段，base64 编码以免
+          # heredoc 的结束标记与本 YAML 块缩进冲突）。
           if [ ! -f drivers/AdrenoMetal/bridge/FuxiScanoutScaleAir.c ]; then
-            echo "WARN: FuxiScanoutScaleAir.c missing; make its compile optional" >&2
-            python3 - <<'PY'
-          from pathlib import Path
-          p = Path("scripts/build-adreno-metal-plugin.py")
-          s = p.read_text()
-          if "FUXI_AIR_OPTIONAL" not in s:
-              old = "subprocess.run([*base, '-std=c11', '-DFUXI_SCANOUT_AIR=' + str(scanout_bc.resolve()),"
-              if old in s:
-                  i = s.index(old)
-                  j = s.index("check=True)", i) + len("check=True)")
-                  s = s[:i] + "if (ROOT / 'drivers/AdrenoMetal/bridge/FuxiScanoutScaleAir.c').is_file():  # FUXI_AIR_OPTIONAL\n    " + s[i:j].replace(chr(10), chr(10) + "    ") + s[j:]
-                  p.write_text(s)
-                  print("patched: FuxiScanoutScaleAir compile is now conditional")
-              else:
-                  print("anchor not found; leaving the script as is")
-          PY
+            echo "FuxiScanoutScaleAir.c missing; restoring it from the recorded patch content"
+            mkdir -p drivers/AdrenoMetal/bridge
+            echo "Ly8gU1BEWC1MaWNlbnNlLUlkZW50aWZpZXI6IE1JVAovLyBmdXhpICgyMDI2LTExLTEzKTogdGhlIEFJUiBvZiBzaGFkZXJzL3NjYW5vdXRfY29udmVydC5sbCAoc2Nhbm91dF9jb252ZXJ0LCBzY2Fub3V0X29wYXF1ZSwgc2Nhbm91dF9zY2FsZSkgaW5zaWRlIHRoZSBwbHVnLWluLCBzbyB0aGUKLy8gR1BVIHNjYWxpbmcga2VybmVsIHNoaXBzIHdpdGhvdXQgcmVidWlsZGluZyB0aGUgUnVzdCBicmlkZ2UuIEZVWElfU0NBTk9VVF9BSVIgaXMgdGhlIGFzc2VtYmxlZCBmaWxlIChsbHZtLWFzKSwgc2V0IGJ5IHRoZSBidWlsZC4KI2luY2x1ZGUgPHN0ZGRlZi5oPgojZGVmaW5lIEZVWElfU1RSMih4KSAjeAojZGVmaW5lIEZVWElfU1RSKHgpIEZVWElfU1RSMih4KQpfX2FzbV9fKCIuc2VjdGlvbiBfX1RFWFQsX19jb25zdFxuIgogICAgICAgICIucDJhbGlnbiA0XG4iCiAgICAgICAgIl9mdXhpX3NjYW5vdXRfYWlyX2JlZ2luOlxuIgogICAgICAgICIuaW5jYmluIFwiIiBGVVhJX1NUUihGVVhJX1NDQU5PVVRfQUlSKSAiXCJcbiIKICAgICAgICAiX2Z1eGlfc2Nhbm91dF9haXJfZW5kOlxuIgogICAgICAgICIudGV4dFxuIik7CmV4dGVybiBjb25zdCB1bnNpZ25lZCBjaGFyIGZ1eGlfc2Nhbm91dF9haXJfYmVnaW5bXSBfX2FzbV9fKCJfZnV4aV9zY2Fub3V0X2Fpcl9iZWdpbiIpOwpleHRlcm4gY29uc3QgdW5zaWduZWQgY2hhciBmdXhpX3NjYW5vdXRfYWlyX2VuZFtdIF9fYXNtX18oIl9mdXhpX3NjYW5vdXRfYWlyX2VuZCIpOwpfX2F0dHJpYnV0ZV9fKCh2aXNpYmlsaXR5KCJkZWZhdWx0IikpKSBjb25zdCB2b2lkICpmdXhpX3NjYW5vdXRfc2NhbGVfYWlyKHNpemVfdCAqbGVuZ3RoKSB7CiAgICBpZiAobGVuZ3RoKSAqbGVuZ3RoID0gKHNpemVfdCkoZnV4aV9zY2Fub3V0X2Fpcl9lbmQgLSBmdXhpX3NjYW5vdXRfYWlyX2JlZ2luKTsKICAgIHJldHVybiBmdXhpX3NjYW5vdXRfYWlyX2JlZ2luOwp9Cg==" | base64 -d > drivers/AdrenoMetal/bridge/FuxiScanoutScaleAir.c
+            wc -c drivers/AdrenoMetal/bridge/FuxiScanoutScaleAir.c
+            head -3 drivers/AdrenoMetal/bridge/FuxiScanoutScaleAir.c
+          else
+            echo "FuxiScanoutScaleAir.c already present"
           fi
           python3 scripts/build-adreno-metal-plugin.py --target ios17e --no-replay
 
