@@ -1639,7 +1639,6 @@ jobs:
                   print("anchor not found; leaving the script as is")
           PY
           fi
-          cd out-ios17/fuxi/tree
           python3 scripts/build-adreno-metal-plugin.py --target ios17e --no-replay
 
       # 第 8 项：编 dylib + 给插件加 @loader_path/FuxiStatusBar.dylib + 重签 + 塞进 addon。
