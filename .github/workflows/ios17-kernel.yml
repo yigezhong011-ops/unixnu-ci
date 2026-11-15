@@ -1433,20 +1433,31 @@ jobs:
           export UNIXNU_OUT="$PWD/out-ios17" UNIXNU_KERNELCACHE="$PWD/out-ios17/ipsw/21H16/kernelcache.decompressed"
           [ -f ../device/scripts/extract-files.py ] && python3 ../device/scripts/extract-files.py --device ../device || echo "extract-files skipped/failed"
           ./unixnu defconfig fuxi_ios17_kernel_defconfig -D ../device-ios17
-          # ★ 壁纸：把 poster 扩展加进 GPU 沙盒放行名单
-          # GpuPowerProbe.cpp 的 NativeSandboxGrantProcess 只写了 PosterBoard，但真正跑壁纸的是
-          # 它的两个扩展 AegirPoster / KaleidoscopePoster（alioth.md:320 记录过同样的错）。
-          # 不在名单里的进程打开 AGXDeviceUserClient 会被 MACF 拒绝（t50 日志实证：
+          # ★ 壁纸：把 poster 扩展加进 GPU 沙盒放行名单（扫所有可能的 GpuPowerProbe.cpp）
+          # GpuPowerProbe.cpp 的 NativeSandboxGrantProcess 只写了 PosterBoard，而真正跑壁纸的是它的
+          # 两个扩展 AegirPoster / KaleidoscopePoster（alioth.md:320 记录过同样的错；t50 日志实证：
           # "IOUC AGXDeviceUserClient failed MACF in process pid 236, AegirPoster"）。
-          # defconfig 已经把 tree 建好，这里改源文件，build kernel 时自然带上。
-          GP="$UNIXNU_OUT/fuxi/tree/kits/sheng/GpuPowerProbe.cpp"
-          if [ -f "$GP" ]; then
-            if grep -q 'PosterBoard,AegirPoster' "$GP"; then
-              echo "sandbox grant list already patched"
+          # build-ios17-legacy-display.py 读 <tree>/kits/sheng/GpuPowerProbe.cpp 并生成
+          # <tree>/build/native-legacy-display/GpuPowerProbe.ios17.cpp 去编译，所以这里
+          # 把所有能读到的 GpuPowerProbe*.cpp 都补上，改完逐个打印确认。
+          for GP in \
+              "$UNIXNU_OUT/fuxi/tree/kits/sheng/GpuPowerProbe.cpp" \
+              "$UNIXNU_OUT/fuxi/tree/package/GpuPowerProbe.cpp" \
+              "../device/package/GpuPowerProbe.cpp" \
+              "$UNIXNU_OUT/fuxi/tree/build/native-legacy-display/GpuPowerProbe.ios17.cpp"; do
+            [ -f "$GP" ] || { echo "skip (absent): $GP"; continue; }
+            if grep -q 'AegirPoster' "$GP"; then
+              echo "already: $GP"
             else
               sed -i 's/WidgetRenderer_Default,PosterBoard"/WidgetRenderer_Default,PosterBoard,AegirPoster,KaleidoscopePoster"/' "$GP"
-              echo "sandbox grant list now: $(grep -o 'NativeSandboxGrantProcess\", *\"[^\"]*' "$GP" | head -1)"
+              echo "patched: $GP  AegirPoster=$(grep -c AegirPoster "$GP")"
             fi
+            grep -o 'backboardd,iconservicesagent[^"]*' "$GP" | head -1
+          done
+          echo "--- 目录探查（万一上面全 absent）---"
+          ls -d "$UNIXNU_OUT/fuxi/tree/kits" 2>/dev/null && ls "$UNIXNU_OUT/fuxi/tree/kits" 2>/dev/null | head -8
+          find "$UNIXNU_OUT/fuxi/tree" -maxdepth 3 -name 'GpuPowerProbe*.cpp' 2>/dev/null | head -8
+
             grep -c 'AegirPoster' "$GP" || true
           else
             echo "WARN: $GP not found; poster extensions not added" >&2
