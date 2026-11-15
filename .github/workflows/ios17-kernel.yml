@@ -1433,6 +1433,42 @@ jobs:
           export UNIXNU_OUT="$PWD/out-ios17" UNIXNU_KERNELCACHE="$PWD/out-ios17/ipsw/21H16/kernelcache.decompressed"
           [ -f ../device/scripts/extract-files.py ] && python3 ../device/scripts/extract-files.py --device ../device || echo "extract-files skipped/failed"
           ./unixnu defconfig fuxi_ios17_kernel_defconfig -D ../device-ios17
+          # ★ 壁纸：让 build-ios17-legacy-display.py 在把 GpuPowerProbe.cpp 读进来之后
+          # 直接把 AegirPoster / KaleidoscopePoster 加进 NativeSandboxGrantProcess 名单。
+          # 之前三次"外部 sed 源文件"都失败（文件在 defconfig / 第一次 build 之后都还不存在，
+          # 而 device/package/ 那份根本不是输入）；改脚本内部的字符串一定生效，
+          # 且绕开脚本里对源文件是否被改动的断言。
+          python3 - <<'FUXI_POSTER_PY'
+          import re, sys
+          from pathlib import Path
+          p = Path('scripts/build-ios17-legacy-display.py')
+          if not p.is_file():
+              print('build-ios17-legacy-display.py not found; poster grant skipped')
+              sys.exit(0)
+          s = p.read_text()
+          if 'fuxi poster grant: include the PosterBoard extensions' in s:
+              print('poster grant already patched')
+              sys.exit(0)
+          anchor = "gpupower_text = (ROOT / 'kits/sheng/GpuPowerProbe.cpp').read_text()"
+          if anchor not in s:
+              print('anchor not found in build-ios17-legacy-display.py; poster grant skipped')
+              sys.exit(0)
+          inject = anchor + chr(10) + (
+              "# fuxi poster grant: include the PosterBoard extensions" + chr(10) +
+              "# NativeSandboxGrantProcess 原来只写 PosterBoard，而真正跑壁纸的是它的两个扩展" + chr(10) +
+              "# AegirPoster / KaleidoscopePoster（alioth.md:320；t50 日志实证 MACF 拒绝 AegirPoster）。" + chr(10) +
+              "# 这里直接改已读入的字符串，既不动源文件（避免下面那个 'changed' 断言），" + chr(10) +
+              "# 又保证写进 GpuPowerProbe.ios17.cpp 的内容带上它们。" + chr(10) +
+              "if 'AegirPoster' not in gpupower_text and 'PosterBoard\")' in gpupower_text:" + chr(10) +
+              "    gpupower_text = gpupower_text.replace(" + chr(10) +
+              "        'WidgetRenderer_Default,PosterBoard\")'," + chr(10) +
+              "        'WidgetRenderer_Default,PosterBoard,AegirPoster,KaleidoscopePoster\")', 1)" + chr(10) +
+              "    print('fuxi poster grant: sandbox list now includes AegirPoster and KaleidoscopePoster')"
+          )
+          s = s.replace(anchor, inject, 1)
+          p.write_text(s)
+          print('patched build-ios17-legacy-display.py for the poster grant list')
+          FUXI_POSTER_PY
 
 
           T="$PWD/out-ios17/fuxi/tree"
@@ -1442,22 +1478,6 @@ jobs:
           # prelink, which fails without the reference; then build the reference, then the kernel again.
           if ! ./unixnu build kernel -D ../device-ios17 -j 4; then
             test -d "$T/.cache/xnu-work"
-          # ★ 壁纸：把 poster 扩展加进 GPU 沙盒放行名单
-          # NativeSandboxGrantProcess 原来只写 PosterBoard，而真正跑壁纸的是它的两个扩展
-          # AegirPoster / KaleidoscopePoster（alioth.md:320 记录同样的错；t50 日志实证
-          # "IOUC AGXDeviceUserClient failed MACF in process pid 236, AegirPoster"）。
-          # 位置很关键：必须在这里（第一次 build kernel 之后），因为 <tree>/kits/sheng/
-          # 是第一次 build 才铺开的；放在 defconfig 之后会因文件不存在而全部跳过。
-          for GP in $(find "$T" -name 'GpuPowerProbe.cpp' 2>/dev/null); do
-            if grep -q 'AegirPoster' "$GP"; then
-              echo "already: $GP"
-            else
-              sed -i 's/WidgetRenderer_Default,PosterBoard"/WidgetRenderer_Default,PosterBoard,AegirPoster,KaleidoscopePoster"/' "$GP" || true
-              echo "patched: $GP"
-            fi
-            grep -o 'backboardd,iconservicesagent[^"]*' "$GP" 2>/dev/null | head -1 || true
-          done
-          echo "--- poster grant done ---"
             echo "=== RELEASE LTO reference"
             # The stub pass only picks undefined names that start with "_"; ld prints C++ names demangled
             # (run 11: "OSValueObject<int>::MetaClass::MetaClass()"). Map those back to their mangled names
